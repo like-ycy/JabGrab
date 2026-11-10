@@ -1,9 +1,13 @@
 package downloader
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -166,6 +170,173 @@ func TestArgsWithFFmpegPath(t *testing.T) {
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "--ffmpeg-binary-path /opt/homebrew/bin/ffmpeg") {
 		t.Fatalf("应显式传入 ffmpeg 路径: %v", args)
+	}
+}
+
+// ffmpeg 是 dl-re 的启动期硬依赖，即便不混流也必须显式传入路径。
+func TestArgsPassesFFmpegWithoutMux(t *testing.T) {
+	o := Options{SaveDir: "/tmp/o", SaveName: "n", MuxToMP4: false, FFmpegPath: "/opt/homebrew/bin/ffmpeg"}
+	args := o.Args("u")
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--ffmpeg-binary-path /opt/homebrew/bin/ffmpeg") {
+		t.Fatalf("不混流也应传 ffmpeg 路径: %v", args)
+	}
+	if strings.Contains(joined, "--mux-after-done") {
+		t.Fatalf("未开混流不该出现 --mux-after-done: %v", args)
+	}
+}
+
+// 缺 ffmpeg 时要在启动子进程之前就报清晰的错，
+// 而不是让它抛未捕获异常、只留一行 stderr。
+func TestRunFailsWithoutFFmpeg(t *testing.T) {
+	old := findFFmpeg
+	findFFmpeg = func(...string) string { return "" }
+	defer func() { findFFmpeg = old }()
+
+	o := Options{Bin: "/bin/echo", SaveDir: t.TempDir(), SaveName: "n"}
+	err := o.Run(context.Background(), "u", nil, nil)
+	if err == nil {
+		t.Fatal("缺 ffmpeg 应报错")
+	}
+	if !strings.Contains(err.Error(), "ffmpeg") {
+		t.Fatalf("错误信息应点明 ffmpeg: %v", err)
+	}
+}
+
+// stdout 与 stderr 各一个协程写同一个 ring，必须在 -race 下无告警。
+func TestRingConcurrentPush(t *testing.T) {
+	r := &ring{limit: 8}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				r.push("line")
+			}
+		}()
+	}
+	wg.Wait()
+	if n := len(r.buf); n != 8 {
+		t.Fatalf("ring 应保持 limit 条，实际 %d", n)
+	}
+	if r.summary() == "" {
+		t.Fatal("摘要不该为空")
+	}
+}
+
+// 下载器必须在保存目录里运行：Finder 启动的 .app 的 cwd 是 /（不可写），
+// 只给 --save-dir 不够，临时分片仍会被写到不可写的位置。
+func TestRunUsesSaveDirAsWorkDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("依赖 POSIX shell")
+	}
+
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake-dlre.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\npwd\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	saveDir := filepath.Join(dir, "out")
+
+	var got []string
+	// ffmpeg 给个非空占位即可：假下载器不看这个参数，测试也就不依赖开发机是否装了 ffmpeg。
+	o := Options{Bin: script, SaveDir: saveDir, SaveName: "n", FFmpegPath: "/usr/bin/false"}
+	if err := o.Run(context.Background(), "u", nil, func(l string) {
+		got = append(got, l)
+	}); err != nil {
+		t.Fatalf("应正常退出: %v", err)
+	}
+
+	wantDir, err := filepath.EvalSymlinks(saveDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, l := range got {
+		if p, err := filepath.EvalSymlinks(strings.TrimSpace(l)); err == nil && p == wantDir {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("子进程工作目录应是保存目录 %s，实际输出: %v", wantDir, got)
+	}
+}
+
+// 配置里用相对路径指定下载器时，切换工作目录后仍要能找到它。
+// （旧实现把 Dir 设成保存目录后，相对路径会按新目录二次解析而失效。）
+func TestRunResolvesRelativeBin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("依赖 POSIX shell")
+	}
+
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake-dlre.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho started\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	o := Options{Bin: "./fake-dlre.sh", SaveDir: filepath.Join(dir, "out"), SaveName: "n", FFmpegPath: "/usr/bin/false"}
+	if err := o.Run(context.Background(), "u", nil, nil); err != nil {
+		t.Fatalf("相对路径的下载器也应能启动: %v", err)
+	}
+}
+
+// 保存目录写成相对路径时，必须绝对化后再同时用作工作目录与 --save-dir，
+// 否则会拼成 out/out，流水线的「已存在」检查也会指向错误位置。
+func TestRunAbsolutizesRelativeSaveDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("依赖 POSIX shell")
+	}
+
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake-dlre.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\npwd\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	var got []string
+	o := Options{Bin: script, SaveDir: "out", SaveName: "n", FFmpegPath: "/usr/bin/false"}
+	if err := o.Run(context.Background(), "u", nil, func(l string) {
+		got = append(got, l)
+	}); err != nil {
+		t.Fatalf("应成功: %v", err)
+	}
+
+	wantDir, err := filepath.EvalSymlinks(filepath.Join(dir, "out"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, l := range got {
+		if p, err := filepath.EvalSymlinks(strings.TrimSpace(l)); err == nil && p == wantDir {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("工作目录应为绝对路径 %s，实际输出: %v", wantDir, got)
+	}
+	// 关键回归点：不允许出现 out/out
+	if st, err := os.Stat(filepath.Join(wantDir, "out")); err == nil && st.IsDir() {
+		t.Fatal("保存目录被二次拼接成了 out/out")
 	}
 }
 

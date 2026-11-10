@@ -14,7 +14,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"jabgrab/internal/proc"
@@ -52,9 +54,22 @@ func (s Scraper) Scrape(ctx context.Context, url, source string) (Result, error)
 	defer cancel()
 
 	args := append(append([]string{}, s.Argv[1:]...), url, "--source", source)
-	cmd := exec.CommandContext(ctx, s.Argv[0], args...) //nolint:gosec // 路径来自配置，属预期行为
+	// 设置了 Dir 之后，带分隔符的相对路径会按新工作目录解析，先转绝对路径；
+	// 裸命令名（如 "uv"）保持原样，交给 PATH 查找。
+	// Windows 上 "bin/x.exe" 这种正斜杠写法也合法，两种分隔符都要认。
+	bin := s.Argv[0]
+	if !filepath.IsAbs(bin) && strings.ContainsAny(bin, `/\`) {
+		if abs, err := filepath.Abs(bin); err == nil {
+			bin = abs
+		}
+	}
+	cmd := exec.CommandContext(ctx, bin, args...) //nolint:gosec // 路径来自配置，属预期行为
 	cmd.Dir = s.Dir
 	proc.Prepare(cmd)
+	// CommandContext 默认只杀主进程，而爬取会拉起浏览器等子进程：
+	// 必须自己把整组杀掉，否则超时/取消后残留进程还攥着 stdout，Wait 会一直阻塞。
+	cmd.Cancel = func() error { return proc.Kill(cmd) }
+	cmd.WaitDelay = 5 * time.Second
 
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
@@ -69,7 +84,9 @@ func (s Scraper) Scrape(ctx context.Context, url, source string) (Result, error)
 
 	// stderr 可能很长（浏览器日志），实时转发给 UI，同时留最后几行做错误摘要。
 	tail := &ring{limit: 20}
+	stderrDone := make(chan struct{})
 	go func() {
+		defer close(stderrDone)
 		sc := bufio.NewScanner(stderrPipe)
 		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		for sc.Scan() {
@@ -82,6 +99,8 @@ func (s Scraper) Scrape(ctx context.Context, url, source string) (Result, error)
 	}()
 
 	waitErr := cmd.Wait()
+	// 先等读协程收尾，再取摘要：否则会与 push 并发，还可能丢掉最后几行错误信息。
+	<-stderrDone
 
 	if ctx.Err() == context.DeadlineExceeded {
 		return Result{}, fmt.Errorf("爬取超时（%s）", timeout)
@@ -124,11 +143,14 @@ func ParseStdout(b []byte) (Result, error) {
 
 // ring 保存最后 N 行，用于错误摘要。
 type ring struct {
+	mu    sync.Mutex
 	limit int
 	buf   []string
 }
 
 func (r *ring) push(s string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.buf = append(r.buf, s)
 	if len(r.buf) > r.limit {
 		r.buf = r.buf[1:]
@@ -136,6 +158,8 @@ func (r *ring) push(s string) {
 }
 
 func (r *ring) summary() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if len(r.buf) == 0 {
 		return ""
 	}

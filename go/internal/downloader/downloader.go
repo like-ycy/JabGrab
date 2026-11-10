@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"jabgrab/internal/proc"
 )
@@ -57,8 +58,14 @@ var extraBinDirs = []string{
 	"/bin",
 }
 
-// FindFFmpeg 在 PATH 与常见目录里查找 ffmpeg，找不到返回空串。
-func FindFFmpeg() string {
+// findFFmpeg 是 FindFFmpeg 的间接引用，测试里可替换成固定返回值。
+var findFFmpeg = FindFFmpeg
+
+// FindFFmpeg 查找 ffmpeg，找不到返回空串。
+//
+// 查找顺序：PATH → near 指定的目录（如下载器所在目录，便携部署常把两者放一起）
+// → 系统常见目录。
+func FindFFmpeg(near ...string) string {
 	name := "ffmpeg"
 	if runtime.GOOS == "windows" {
 		name = "ffmpeg.exe"
@@ -66,7 +73,13 @@ func FindFFmpeg() string {
 	if p, err := exec.LookPath(name); err == nil {
 		return p
 	}
-	for _, d := range extraBinDirs {
+	dirs := make([]string, 0, len(near)+len(extraBinDirs))
+	dirs = append(dirs, near...)
+	dirs = append(dirs, extraBinDirs...)
+	for _, d := range dirs {
+		if d == "" || d == "." {
+			continue
+		}
 		cand := filepath.Join(d, name)
 		if st, err := os.Stat(cand); err == nil && !st.IsDir() {
 			return cand
@@ -147,11 +160,14 @@ func (o Options) Args(m3u8 string) []string {
 
 	// 去掉 ANSI 控制符，否则捕获到的 stdout 充满转义序列，无法解析进度。
 	args = append(args, "--no-ansi-color", "--auto-select")
+
+	// ffmpeg 是 dl-re 的启动期硬依赖（缺了直接抛异常退出），与是否混流无关，
+	// 所以只要拿到路径就显式传入，避免依赖子进程自己去 PATH 里找。
+	if o.FFmpegPath != "" {
+		args = append(args, "--ffmpeg-binary-path", o.FFmpegPath)
+	}
 	if o.MuxToMP4 {
 		args = append(args, "--mux-after-done", "format=mp4")
-		if o.FFmpegPath != "" {
-			args = append(args, "--ffmpeg-binary-path", o.FFmpegPath)
-		}
 	}
 
 	// headers 顺序固定，便于日志与测试复现
@@ -177,12 +193,47 @@ func (o Options) Run(
 	if o.Bin == "" {
 		return fmt.Errorf("未指定 N_m3u8DL-RE 路径")
 	}
+
+	// 下面会把工作目录切到保存目录，届时相对路径的可执行文件会按新目录解析，
+	// 因此先把带路径分隔符的相对路径转成绝对路径（裸命令名仍交给 PATH 查找）。
+	// Windows 上 "bin/x.exe" 这种正斜杠写法也合法，两种分隔符都要认。
+	bin := o.Bin
+	if !filepath.IsAbs(bin) && strings.ContainsAny(bin, `/\`) {
+		if abs, err := filepath.Abs(bin); err == nil {
+			bin = abs
+		}
+	}
+
+	// 保存目录同时用作工作目录和 --save-dir，必须先绝对化：
+	// 相对路径会被二次拼接成 out/out，流水线的「已存在」检查也会看错地方。
+	if o.SaveDir != "" {
+		if abs, err := filepath.Abs(o.SaveDir); err == nil {
+			o.SaveDir = abs
+		}
+		if err := os.MkdirAll(o.SaveDir, 0o755); err != nil {
+			return fmt.Errorf("无法创建保存目录 %s: %w", o.SaveDir, err)
+		}
+	}
+
+	// ffmpeg 是启动期硬依赖：缺失时 dl-re 会抛出未捕获异常直接退出，
+	// 不论是否要求混流。所以先解析到可用路径，拿不到就不启动。
+	// 除了 PATH 和系统目录，还要看下载器所在目录——便携部署常把两者放在一起。
+	if o.FFmpegPath == "" {
+		o.FFmpegPath = findFFmpeg(filepath.Dir(bin))
+	}
+	if o.FFmpegPath == "" {
+		return fmt.Errorf("未找到 ffmpeg：N_m3u8DL-RE 启动时强制校验 ffmpeg，" +
+			"请先安装（macOS 可用 brew install ffmpeg，Windows 把 ffmpeg.exe 所在目录加入 PATH，" +
+			"或把 ffmpeg 放在下载器同目录）后重试")
+	}
+
 	emit := func(string) {}
 	if onLog != nil {
 		emit = onLog
 	}
 
-	cmd := exec.CommandContext(ctx, o.Bin, o.Args(m3u8)...) //nolint:gosec // 路径与参数均来自本地配置
+	cmd := exec.CommandContext(ctx, bin, o.Args(m3u8)...) //nolint:gosec // 路径与参数均来自本地配置
+	cmd.Dir = o.SaveDir
 	cmd.Env = childEnv()
 	proc.Prepare(cmd)
 	cmd.Cancel = func() error { return proc.Kill(cmd) }
@@ -327,7 +378,11 @@ func splitLines(r io.Reader, emit func(string)) error {
 	}
 }
 
+// ring 保存最后 N 行，用于错误摘要。
+//
+// stdout 与 stderr 各由一个协程写入，必须加锁，否则并发 append/切片会丢行甚至损坏数据。
 type ring struct {
+	mu    sync.Mutex
 	limit int
 	buf   []string
 }
@@ -336,6 +391,8 @@ func (r *ring) push(s string) {
 	if strings.TrimSpace(s) == "" {
 		return
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.buf = append(r.buf, s)
 	if len(r.buf) > r.limit {
 		r.buf = r.buf[1:]
@@ -343,6 +400,8 @@ func (r *ring) push(s string) {
 }
 
 func (r *ring) summary() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if len(r.buf) == 0 {
 		return ""
 	}

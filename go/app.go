@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"jabgrab/internal/config"
+	"jabgrab/internal/downloader"
 	"jabgrab/internal/locate"
 	"jabgrab/internal/pipeline"
 )
@@ -55,11 +57,16 @@ func (a *App) startup(ctx context.Context) {
 
 	cfg, loadErr := config.Load()
 	if loadErr != nil {
-		runtime.LogWarningf(ctx, "读取配置失败，使用默认值: %v", loadErr)
-	}
-	// 首次运行时把默认配置落盘，方便用户直接改文件
-	if err := config.Save(cfg); err != nil {
-		runtime.LogWarningf(ctx, "写入配置失败: %v", err)
+		// 文件存在但读不出来（多半是手改出语法错误）：保留原文件让用户修，
+		// 绝不能拿默认值覆盖掉他的保存路径、站点和下载参数。
+		runtime.LogWarningf(ctx, "读取配置失败，本次使用默认值（磁盘上的原文件保持不变）: %v", loadErr)
+	} else if !config.Exists() {
+		// 仅首次运行才落盘默认配置，方便用户直接改文件
+		saved, err := config.Save(cfg)
+		if err != nil {
+			runtime.LogWarningf(ctx, "写入默认配置失败: %v", err)
+		}
+		cfg = saved
 	}
 
 	a.mu.Lock()
@@ -120,7 +127,10 @@ func (a *App) Boot() BootInfo {
 // SaveConfig 保存配置并返回最新的自检结果。
 func (a *App) SaveConfig(cfg config.Config) (BootInfo, error) {
 	cfg.PushRecentTxt(cfg.TxtPath)
-	if err := config.Save(cfg); err != nil {
+	// Save 会补全默认值，必须用它的返回值更新运行态，否则用户清空某个字段后
+	// 会出现「盘上已修正、内存里还是空」的错位，保存后当次会话反而起不来。
+	cfg, err := config.Save(cfg)
+	if err != nil {
 		return BootInfo{}, err
 	}
 
@@ -189,6 +199,15 @@ func (a *App) Start() error {
 	}
 	if issues := cfg.Check(); len(issues) > 0 {
 		return fmt.Errorf("配置有问题: %s", strings.Join(issues, "；"))
+	}
+	// 提前拦住：ffmpeg 缺失时 dl-re 启动即崩，等用户点开始后再逐条失败体验很差。
+	// 查下载器同目录，兼容「ffmpeg 与 dl-re 放一起」的便携部署。
+	if dlr, _, err := locate.Dlr(cfg); err == nil {
+		if downloader.FindFFmpeg(filepath.Dir(dlr)) == "" {
+			return errors.New("未找到 ffmpeg：N_m3u8DL-RE 启动时必须校验 ffmpeg，" +
+				"请先安装（macOS 可 brew install ffmpeg；Windows 把 ffmpeg.exe 所在目录加入 PATH，" +
+				"或把 ffmpeg 放到下载器同目录）")
+		}
 	}
 
 	go func() {

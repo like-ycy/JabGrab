@@ -58,6 +58,23 @@ func TestScrapeRunsCommand(t *testing.T) {
 	}
 }
 
+// 裸命令名（不带路径分隔符）必须仍走 PATH 查找，
+// 不能被「相对路径转绝对」的逻辑改成 cwd 下的文件名。
+func TestScrapeBareCommandUsesPath(t *testing.T) {
+	s := Scraper{
+		Argv:    []string{"sh", "-c", `echo '{"ok": true, "m3u8_url": "u", "video_name": "n"}'`},
+		Dir:     t.TempDir(),
+		Timeout: 10 * time.Second,
+	}
+	res, err := s.Scrape(context.Background(), "https://example.com", "jable")
+	if err != nil {
+		t.Fatalf("裸命令名应能通过 PATH 找到: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("结果不符: %+v", res)
+	}
+}
+
 func TestScrapeTimeout(t *testing.T) {
 	s := Scraper{
 		Argv:    []string{"/bin/sh", "-c", "sleep 5"},
@@ -69,6 +86,45 @@ func TestScrapeTimeout(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "超时") {
 		t.Fatalf("错误信息应说明超时: %v", err)
+	}
+}
+
+// 超时必须连子进程一起杀掉，否则孙进程还攥着 stdout，Wait 会一直等到它自己退出。
+// 这里让 shell 在后台 sleep 30 秒：只杀父进程的话，本次调用会卡满 30 秒。
+func TestScrapeTimeoutKillsProcessGroup(t *testing.T) {
+	s := Scraper{
+		Argv:    []string{"/bin/sh", "-c", "sleep 30 & wait"},
+		Timeout: 300 * time.Millisecond,
+	}
+	start := time.Now()
+	if _, err := s.Scrape(context.Background(), "https://example.com", "jable"); err == nil {
+		t.Fatal("应超时")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("取消未杀掉进程组，耗时 %s（应接近 300ms）", elapsed)
+	}
+}
+
+// 取消（用户点停止）同样要立刻返回，而不是等子进程自然结束。
+func TestScrapeCancelKillsProcessGroup(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	s := Scraper{
+		Argv:    []string{"/bin/sh", "-c", "sleep 30 & wait"},
+		Timeout: 60 * time.Second,
+	}
+
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := s.Scrape(ctx, "https://example.com", "jable")
+	if err == nil {
+		t.Fatal("取消后应返回错误")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("取消未及时返回，耗时 %s", elapsed)
 	}
 }
 

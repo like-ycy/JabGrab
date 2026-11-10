@@ -352,7 +352,15 @@ function bindButtons() {
     document.querySelectorAll("[data-pick]").forEach((btn) => {
         btn.addEventListener("click", async () => {
             const kind = btn.dataset.pick;
-            const fn = kind === "dlr" ? api().SelectDlr : api().SelectDir;
+            // 必须按类型分派：txt 要选文件，saveDir 选目录，dlr 选可执行文件
+            const bind = api();
+            const pickers = {
+                txt: bind.SelectTxt,
+                saveDir: bind.SelectDir,
+                dlr: bind.SelectDlr,
+            };
+            const fn = pickers[kind];
+            if (!fn) return;
             const p = await fn();
             if (!p) return;
             if (kind === "saveDir") el("saveDir").value = p;

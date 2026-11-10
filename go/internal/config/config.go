@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -119,24 +120,40 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
-// Save 把配置写入用户配置目录。
-func Save(cfg Config) error {
+// Exists 报告配置文件是否已存在。
+//
+// 用于区分「首次运行」和「文件读了但解析失败」：后者绝不能拿默认值覆盖，
+// 否则用户手改出语法错误的配置会被直接冲掉。
+func Exists() bool {
+	p, err := Path()
+	if err != nil {
+		return false
+	}
+	st, err := os.Stat(p)
+	return err == nil && !st.IsDir()
+}
+
+// Save 把配置写入用户配置目录，并返回补全默认值之后的配置。
+//
+// 返回值务必拿去更新运行态：normalize 作用在副本上，若调用方继续用传入的
+// 原值，就会出现「盘上是对的、内存里是空的」这种前后不一致。
+func Save(cfg Config) (Config, error) {
 	cfg.normalize()
 	p, err := Path()
 	if err != nil {
-		return err
+		return cfg, err
 	}
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return fmt.Errorf("创建配置目录失败: %w", err)
+		return cfg, fmt.Errorf("创建配置目录失败: %w", err)
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
-		return fmt.Errorf("序列化配置失败: %w", err)
+		return cfg, fmt.Errorf("序列化配置失败: %w", err)
 	}
 	if err := os.WriteFile(p, append(data, '\n'), 0o644); err != nil {
-		return fmt.Errorf("写入配置失败: %w", err)
+		return cfg, fmt.Errorf("写入配置失败: %w", err)
 	}
-	return nil
+	return cfg, nil
 }
 
 // normalize 给缺失/非法的字段补默认值，避免旧配置少字段时行为突变。
@@ -274,7 +291,8 @@ func executableOK(p string) error {
 	if st.IsDir() {
 		return fmt.Errorf("是目录而非可执行文件")
 	}
-	if st.Mode()&0o111 == 0 {
+	// Windows 上普通文件的权限位恒为 0666，不含执行位，按 Unix 规则判断会误报。
+	if runtime.GOOS != "windows" && st.Mode()&0o111 == 0 {
 		return fmt.Errorf("没有执行权限")
 	}
 	return nil

@@ -135,7 +135,6 @@ func (r *Runner) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-
 	items := buildItems(cfg, urls)
 	r.mu.Lock()
 	r.state = State{Running: true, Total: len(items), Items: items}
@@ -151,6 +150,12 @@ func (r *Runner) Run(ctx context.Context) error {
 	dlrPath, dlrSource, dlrErr := locate.Dlr(cfg)
 	if dlrErr != nil {
 		return dlrErr
+	}
+	// ffmpeg 是 dl-re 的启动期硬依赖：缺了它连下载都不开始（不是只影响混流）。
+	// 除了 PATH，也要认下载器同目录（便携部署的常见摆法），否则会误拒可用环境。
+	if downloader.FindFFmpeg(filepath.Dir(dlrPath)) == "" {
+		return errors.New("未找到 ffmpeg：N_m3u8DL-RE 启动时必须校验 ffmpeg，" +
+			"请安装后重试，或把 ffmpeg 放到下载器同目录")
 	}
 	scrapeArgv, scrapeDir, scrapeErr := locate.Scrape(cfg)
 	if scrapeErr != nil {
@@ -252,14 +257,8 @@ func (r *Runner) process(
 		TimeoutSec: cfg.Download.TimeoutSec,
 		MaxSpeed:   cfg.Download.MaxSpeed,
 		MuxToMP4:   cfg.Download.MuxToMP4,
-		FFmpegPath: downloader.FindFFmpeg(),
+		FFmpegPath: downloader.FindFFmpeg(filepath.Dir(dlrPath)),
 		Headers:    res.Headers,
-	}
-	// 没有 ffmpeg 就别要求混流，否则下载完会在合并阶段报错，
-	// 白白把一次成功的下载标成失败。
-	if opts.MuxToMP4 && opts.FFmpegPath == "" {
-		opts.MuxToMP4 = false
-		r.logf("warn", "未找到 ffmpeg，本次跳过混流，直接保留原始文件")
 	}
 
 	err = opts.Run(ctx, res.M3U8URL,
