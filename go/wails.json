@@ -1,0 +1,16 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "jabgrab",
+  "outputfilename": "jabgrab",
+  "frontend:install": "",
+  "frontend:build": "",
+  "frontend:dev:watcher": "",
+  "frontend:dev:serverUrl": "",
+  "author": {
+    "name": "JabGrab"
+  },
+  "info": {
+    "productName": "JabGrab",
+    "productVersion": "0.1.0"
+  }
+}

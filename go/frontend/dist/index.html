@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>JabGrab</title>
+    <link rel="stylesheet" href="style.css" />
+</head>
+
+<body>
+    <header class="topbar">
+        <div class="brand">
+            <span class="logo">JG</span>
+            <span>JabGrab</span>
+        </div>
+        <nav class="tabs">
+            <button class="tab active" data-view="tasks">任务</button>
+            <button class="tab" data-view="settings">设置</button>
+        </nav>
+        <div class="env" id="envBadge">自检中…</div>
+    </header>
+
+    <div class="banner hidden" id="issueBanner"></div>
+
+    <main>
+        <!-- 任务页 -->
+        <section class="view active" id="view-tasks">
+            <div class="card">
+                <div class="toolbar">
+                    <div class="path-box">
+                        <label>URL 列表</label>
+                        <div class="path" id="txtPath">未选择 txt 文件</div>
+                    </div>
+                    <div class="actions">
+                        <button id="btnPickTxt">选择 txt</button>
+                        <button id="btnStart" class="primary">开始</button>
+                        <button id="btnStop" class="danger" disabled>停止</button>
+                    </div>
+                </div>
+                <div class="overall">
+                    <div class="overall-text">
+                        <strong id="summaryText">等待开始</strong>
+                        <span id="summaryDetail"></span>
+                    </div>
+                    <div class="bar big"><i id="overallBar" style="width:0%"></i></div>
+                </div>
+            </div>
+
+            <div class="card list-card">
+                <table class="task-table">
+                    <thead>
+                        <tr>
+                            <th class="col-idx">#</th>
+                            <th class="col-name">名称 / URL</th>
+                            <th class="col-site">站点</th>
+                            <th class="col-status">状态</th>
+                            <th class="col-progress">进度</th>
+                            <th class="col-speed">速度</th>
+                        </tr>
+                    </thead>
+                    <tbody id="taskBody">
+                        <tr class="empty">
+                            <td colspan="6">还没有任务，选择 txt 后点“开始”</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="card log-card">
+                <div class="log-head">
+                    <span>运行日志</span>
+                    <button id="btnClearLog" class="ghost">清空</button>
+                </div>
+                <pre id="log"></pre>
+            </div>
+        </section>
+
+        <!-- 设置页 -->
+        <section class="view" id="view-settings">
+            <div class="card">
+                <h2>路径</h2>
+                <div class="field">
+                    <label>视频保存目录</label>
+                    <div class="input-row">
+                        <input id="saveDir" type="text" placeholder="下载输出目录" />
+                        <button data-pick="saveDir">选择…</button>
+                    </div>
+                </div>
+                <div class="field">
+                    <label>待下载 txt</label>
+                    <div class="input-row">
+                        <input id="txtPathInput" type="text" placeholder="URL 列表文件" />
+                        <button data-pick="txt">选择…</button>
+                    </div>
+                    <div class="recent" id="recentTxt"></div>
+                </div>
+                <div class="field">
+                    <label>N_m3u8DL-RE 路径</label>
+                    <div class="input-row">
+                        <input id="dlrPath" type="text" placeholder="留空则用程序同级目录或 PATH" />
+                        <button data-pick="dlr">选择…</button>
+                    </div>
+                    <div class="hint" id="dlrHint"></div>
+                </div>
+                <div class="field">
+                    <label>爬取命令</label>
+                    <div class="input-row">
+                        <input id="pythonCmd" type="text" placeholder="留空则自动探测（同级 jab-scrape 或 uv run）" />
+                    </div>
+                    <div class="hint" id="scrapeHint"></div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>站点</h2>
+                <p class="hint">只有已启用站点、且 URL 包含其关键字的链接才会被处理。</p>
+                <div id="siteList" class="site-list"></div>
+            </div>
+
+            <div class="card">
+                <h2>下载参数</h2>
+                <div class="grid">
+                    <div class="field">
+                        <label>线程数</label>
+                        <input id="threads" type="number" min="1" max="128" />
+                    </div>
+                    <div class="field">
+                        <label>分片重试次数</label>
+                        <input id="retryCount" type="number" min="1" max="200" />
+                    </div>
+                    <div class="field">
+                        <label>HTTP 超时（秒）</label>
+                        <input id="timeoutSec" type="number" min="5" max="600" />
+                    </div>
+                    <div class="field">
+                        <label>限速（如 15M，留空不限）</label>
+                        <input id="maxSpeed" type="text" placeholder="15M / 800K" />
+                    </div>
+                    <div class="field">
+                        <label>爬取超时（秒）</label>
+                        <input id="scrapeTimeoutSec" type="number" min="30" max="900" />
+                    </div>
+                    <div class="field checkbox-field">
+                        <label>
+                            <input id="muxToMP4" type="checkbox" />
+                            完成后混流为 mp4
+                        </label>
+                    </div>
+                </div>
+            </div>
+
+            <div class="save-row">
+                <button id="btnSave" class="primary">保存设置</button>
+                <span class="hint" id="saveHint"></span>
+            </div>
+        </section>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+
+</html>

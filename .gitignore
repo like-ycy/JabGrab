@@ -1,0 +1,37 @@
+# ---------- 系统 ----------
+.DS_Store
+
+# ---------- 发行产物 ----------
+# scripts/build.sh 的输出（约 109M），只忽略根目录的 dist
+/dist/
+
+# 原始下载的 N_m3u8DL-RE 副本；构建实际使用 go/third_party/ 下的那一份
+/N_m3u8DL-RE
+
+# ---------- Python ----------
+python/.venv/
+python/build/
+python/.ruff_cache/
+__pycache__/
+*.py[cod]
+
+# ---------- Go / Wails ----------
+go/build/
+# Wails 生成的 JS 绑定，前端直接用 window.go 调用，无需纳入版本管理
+go/frontend/wailsjs/
+
+# ---------- 运行时残留 ----------
+# seleniumbase 启动时自动生成
+latest_logs/
+downloaded_files/
+archived_files/
+archived_logs/
+# N_m3u8DL-RE 的运行日志
+Logs/
+# 真实下载测试产生的分片
+go/internal/downloader/probe/
+*.log
+
+# ---------- 本地工具数据 ----------
+.workbuddy/
+.serena/

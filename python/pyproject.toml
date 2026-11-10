@@ -1,0 +1,33 @@
+[project]
+name = "jab-scrape"
+version = "0.1.0"
+description = "m3u8 爬取 CLI：输入页面 URL，输出 JSON（m3u8 地址 / 标题 / 下载 headers）"
+requires-python = ">=3.10"
+dependencies = [
+    "seleniumbase",
+]
+
+[project.scripts]
+jab-scrape = "jab_scrape.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jab_scrape"]
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+[dependency-groups]
+dev = [
+    "pyinstaller>=6.16.0",
+    "pytest>=9.1.1",
+    "ruff>=0.17.4",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
