@@ -1,8 +1,10 @@
 package pipeline
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"jabgrab/internal/config"
@@ -14,6 +16,8 @@ func TestReadURLs(t *testing.T) {
 	content := `# 注释行
 https://jable.tv/videos/abc-123/
 https://jable.tv/videos/abc-123/
+https://jable.tv/videos/abc-123
+https://jable.tv/videos/abc-123#comments
    
 https://missav.com/en/xyz-456
 不合法的一行
@@ -146,6 +150,195 @@ func TestFindExisting(t *testing.T) {
 	// 不同名字不能误命中
 	if got := findExisting(root, root, "ABC-123-C"); got != "" {
 		t.Fatalf("不应命中其他名字: %q", got)
+	}
+}
+
+func TestURLKey(t *testing.T) {
+	cases := map[string]string{
+		"https://jable.tv/videos/abc-123/":  "https://jable.tv/videos/abc-123",
+		"https://jable.tv/videos/abc-123":   "https://jable.tv/videos/abc-123",
+		"https://jable.tv/videos/abc-123#c": "https://jable.tv/videos/abc-123",
+		// query 保留：不同参数可能是不同资源
+		"https://jable.tv/videos/a?p=2": "https://jable.tv/videos/a?p=2",
+	}
+	for in, want := range cases {
+		if got := urlKey(in); got != want {
+			t.Fatalf("urlKey(%q)=%q want %q", in, got, want)
+		}
+	}
+}
+
+func TestPlainName(t *testing.T) {
+	if got, ok := plainName("ABC-123-C"); !ok || got != "ABC-123" {
+		t.Fatalf("应识别中文字幕版 got=%q ok=%v", got, ok)
+	}
+	// 普通版不应被当成字幕版
+	if got, ok := plainName("ABC-123"); ok || got != "" {
+		t.Fatalf("普通版不应命中 got=%q ok=%v", got, ok)
+	}
+	// 只有后缀没有番号时不能返回空基础名，否则会误删整个目录下的同名文件
+	if _, ok := plainName("-C"); ok {
+		t.Fatal("空基础名不应返回 ok")
+	}
+	// 番号本身以 -C 结尾时只去一层
+	if got, ok := plainName("ABC-123-C-C"); !ok || got != "ABC-123-C" {
+		t.Fatalf("应只去掉一层后缀 got=%q ok=%v", got, ok)
+	}
+}
+
+// 中文字幕版下完后，同名的非中文字幕旧档要清掉：
+// 目标演员目录、保存目录根、其它演员目录里的都算。
+func TestRemovePlainVideo(t *testing.T) {
+	root := t.TempDir()
+	actor := filepath.Join(root, "釈アリス")
+	other := filepath.Join(root, "三上悠亜")
+	for _, d := range []string{actor, other} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	write := func(p string) {
+		if err := os.WriteFile(p, []byte("data"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 普通版散落在三处：目标目录、根目录、别的演员目录
+	inActor := filepath.Join(actor, "ABC-123.mp4")
+	inRoot := filepath.Join(root, "ABC-123.mkv")
+	inOther := filepath.Join(other, "ABC-123.mp4")
+	for _, p := range []string{inActor, inRoot, inOther} {
+		write(p)
+	}
+	// 不是同一部片子的文件，绝不能动
+	keep := filepath.Join(actor, "ABC-124.mp4")
+	write(keep)
+
+	// 还没有中文字幕版时一个都不能删：删了就是把这部片子删没了
+	if removed, err := removePlainVideo(root, actor, "ABC-123"); err != nil || len(removed) != 0 {
+		t.Fatalf("没有 -C 版时不应删除 removed=%v err=%v", removed, err)
+	}
+	for _, p := range []string{inActor, inRoot, inOther} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("文件应保留 %s", p)
+		}
+	}
+
+	// 中文字幕版就位后，三处普通版清空
+	sub := filepath.Join(actor, "ABC-123-C.mp4")
+	write(sub)
+
+	removed, err := removePlainVideo(root, actor, "ABC-123")
+	if err != nil {
+		t.Fatalf("删除不应报错: %v", err)
+	}
+	if len(removed) != 3 {
+		t.Fatalf("应删掉 3 个普通版 got=%v", removed)
+	}
+	for _, p := range []string{inActor, inRoot, inOther} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("应已删除 %s", p)
+		}
+	}
+	for _, p := range []string{keep, sub} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("不应删除 %s: %v", p, err)
+		}
+	}
+}
+
+// 下载器报成功但只留了个残件时，绝不能删掉完整的普通版。
+func TestDropPlainVideoKeepsPlainWhenSubtitleIncomplete(t *testing.T) {
+	root := t.TempDir()
+	actor := filepath.Join(root, "釈アリス")
+	if err := os.MkdirAll(actor, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	plain := filepath.Join(actor, "ABC-123.mp4")
+	sub := filepath.Join(actor, "ABC-123-C.mp4")
+	if err := os.WriteFile(plain, bytes.Repeat([]byte("x"), 1000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// 明显是碎片：不足普通版的 1/2
+	if err := os.WriteFile(sub, []byte("frag"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var logs []string
+	r := New(config.Default(), Hooks{OnLog: func(level, text string) {
+		logs = append(logs, level+" "+text)
+	}})
+	r.dropPlainVideo(1, 1, root, actor, "ABC-123")
+
+	if _, err := os.Stat(plain); err != nil {
+		t.Fatalf("残件场景下普通版应保留: %v", err)
+	}
+	warned := false
+	for _, l := range logs {
+		if strings.HasPrefix(l, "warn ") && strings.Contains(l, "未下载完整") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Fatalf("应给出未完整告警 got=%v", logs)
+	}
+
+	// 换成正常大小的成品后才会真的清理
+	if err := os.WriteFile(sub, bytes.Repeat([]byte("x"), 1000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r.dropPlainVideo(1, 1, root, actor, "ABC-123")
+	if _, err := os.Stat(plain); !os.IsNotExist(err) {
+		t.Fatal("成品完整时应删除普通版")
+	}
+	if _, err := os.Stat(sub); err != nil {
+		t.Fatalf("中文字幕版应保留: %v", err)
+	}
+}
+
+// 下载前判断：普通版链接遇到已有中文字幕版要跳过；
+// 中文字幕版链接遇到只有普通版时仍要下载（否则永远升不上去）。
+func TestNameCandidates(t *testing.T) {
+	plain := nameCandidates("ABC-123")
+	if len(plain) != 2 || plain[0] != "ABC-123" || plain[1] != "ABC-123-C" {
+		t.Fatalf("普通版应同时接受两个版本 got=%v", plain)
+	}
+	sub := nameCandidates("ABC-123-C")
+	if len(sub) != 1 || sub[0] != "ABC-123-C" {
+		t.Fatalf("中文字幕版只认自己 got=%v", sub)
+	}
+}
+
+func TestFindExistingVersion(t *testing.T) {
+	root := t.TempDir()
+	actor := filepath.Join(root, "釈アリス")
+	if err := os.MkdirAll(actor, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	plain := filepath.Join(actor, "ABC-123.mp4")
+	sub := filepath.Join(actor, "ABC-123-C.mp4")
+
+	// 本地只有普通版：普通版链接跳过，中文字幕版链接照下
+	if err := os.WriteFile(plain, []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := findExistingVersion(root, actor, "ABC-123"); got != plain {
+		t.Fatalf("普通版应命中 got=%q", got)
+	}
+	if got := findExistingVersion(root, actor, "ABC-123-C"); got != "" {
+		t.Fatalf("只有普通版时中文字幕版不应跳过 got=%q", got)
+	}
+
+	// 本地两份都在：两种链接都跳过
+	if err := os.WriteFile(sub, []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := findExistingVersion(root, actor, "ABC-123-C"); got != sub {
+		t.Fatalf("中文字幕版应命中 got=%q", got)
+	}
+	if got := findExistingVersion(root, actor, "ABC-123"); got != plain {
+		t.Fatalf("普通版应命中已有普通版 got=%q", got)
 	}
 }
 

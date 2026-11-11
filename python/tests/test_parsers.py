@@ -29,6 +29,33 @@ JABLE_HTML_FIXED = """
 </body></html>
 """
 
+# 只有分类标签、没有那句文案（标签是首选判据）
+JABLE_HTML_CAT_TAG = """
+<html><head><title>ABC-123 作品标题</title></head>
+<body>
+<section class="video-info">
+  <div class="info-header">
+    <div class="header-right">
+      <a class="cat" href="https://jable.tv/categories/chinese-subtitle/">中文字幕</a>
+    </div>
+  </div>
+</section>
+<script>var hlsUrl = 'https://cdn.jable.tv/hls/abc-123.m3u8';</script>
+</body></html>
+"""
+
+# 导航栏/推荐位挂着同一个分类链接，但当前作品不是字幕版：不能误判
+JABLE_HTML_NAV_CAT = """
+<html><head><title>ABC-123 作品标题</title></head>
+<body>
+<nav><a href="https://jable.tv/categories/chinese-subtitle/">中文字幕</a></nav>
+<section class="video-info">
+  <div class="info-header"><h4>ABC-123 作品标题</h4></div>
+</section>
+<script>var hlsUrl = 'https://cdn.jable.tv/hls/abc-123.m3u8';</script>
+</body></html>
+"""
+
 MISSAV_HTML = (
     "<html><head><title>ABC-123 作品标题</title></head><body>"
     r'"image": "https:\/\/surrit.com\/' + UUID + r'\/seek\/_0.jpg"'
@@ -74,6 +101,29 @@ class TestJable:
     def test_chinese_subtitle_suffix(self):
         _, name = JableScraper().extract(JABLE_HTML_FIXED)
         assert name == "ABC-123-C"
+
+    def test_chinese_subtitle_by_cat_tag(self):
+        """分类标签是首选判据：没有那句文案也要认出来。"""
+        _, name = JableScraper().extract(JABLE_HTML_CAT_TAG)
+        assert name == "ABC-123-C"
+
+    def test_cat_tag_outside_detail_ignored(self):
+        """导航栏/推荐位的分类链接不算，只有详情区里的才算。"""
+        _, name = JableScraper().extract(JABLE_HTML_NAV_CAT)
+        assert name == "ABC-123"
+
+    def test_chinese_subtitle_absent(self):
+        _, name = JableScraper().extract(JABLE_HTML)
+        assert name == "ABC-123"
+
+    def test_chinese_subtitle_text_outside_desc_ignored(self):
+        """文案判定只看详情描述区，页面别处出现「中文字幕」不算。"""
+        html = """
+        <html><head><title>ABC-123 作品标题</title></head>
+        <body><div class="header-right">中文字幕</div></body></html>
+        """
+        _, name = JableScraper().extract(html)
+        assert name == "ABC-123"
 
     def test_site_title_rejected(self):
         html = "<title>Jable</title>"

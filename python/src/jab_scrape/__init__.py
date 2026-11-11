@@ -22,7 +22,7 @@ for _stream in (_sys.stdout, _sys.stderr):
         pass
 del _stream
 
-from .models import ScrapeResult  # noqa: E402
-from .scraper import BaseScraper  # noqa: E402
+from .models import ScrapeResult
+from .scraper import BaseScraper
 
 __all__ = ["BaseScraper", "ScrapeResult"]

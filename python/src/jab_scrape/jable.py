@@ -8,6 +8,17 @@ from .scraper import BaseScraper
 # 后会把 title 搬到 data-original-title 并把 title 置空，所以两个都要读。
 NAME_ATTRS = ("data-original-title", "title")
 
+# 中文字幕标记（两条路，按可靠性排序）：
+# 1. 分类标签：站内中文字幕作品会挂一个指向 chinese-subtitle 分类的链接。
+#    但这个链接在页面导航栏、推荐位也有，只能在**当前作品的详情区**里找，
+#    全页查询会把普通作品误判成字幕版。
+# 2. 正文文案：标签被改版时兜底，「中文字幕」这几个字一直在详情描述里。
+CHINESE_SUB_CAT = 'a[href*="chinese-subtitle"]'
+CHINESE_SUB_TEXT = "中文字幕"
+
+# 详情信息区容器，按页面结构从内到外依次尝试；都没有就只认正文文案。
+DETAIL_SCOPES = ("section.video-info", ".video-info", ".info-header")
+
 
 class JableScraper(BaseScraper):
     def extract(self, html: str) -> tuple[str | None, str | None]:
@@ -21,12 +32,30 @@ class JableScraper(BaseScraper):
         if video_name in ("Jable", "MissAV"):
             return None, None
 
-        # 中文字幕版标记
-        desc = self.extract_group(html, r'<h5 class="desc h6-md">([^<]*)</h5>')
-        if desc == "此作品曾在本站上傳，現已更新至中文字幕版。":
+        if self.has_chinese_subtitle(html):
             video_name += "-C"
 
         return m3u8_url, video_name
+
+    @staticmethod
+    def has_chinese_subtitle(html: str) -> bool:
+        """是否中文字幕版：先认详情区里的分类标签，再回退到详情文案。
+
+        标签只在详情区里算数——页面顶部导航、侧边推荐位也挂着同一个分类链接，
+        全页匹配会让普通作品被误判成字幕版（进而被改名成 -C、覆盖掉原文件）。
+        """
+        soup = BeautifulSoup(html, "html.parser")
+
+        for selector in DETAIL_SCOPES:
+            scope = soup.select_one(selector)
+            if scope is None:
+                continue
+            if scope.select_one(CHINESE_SUB_CAT):
+                return True
+            break  # 已经定位到详情区，不再往全页扩
+
+        desc = soup.select_one("h5.desc")
+        return bool(desc and CHINESE_SUB_TEXT in desc.get_text())
 
     def extract_actors(self, html: str) -> list[str]:
         """详情页的演员名。

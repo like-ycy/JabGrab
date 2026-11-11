@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -243,7 +244,10 @@ func (r *Runner) process(
 		r.logf("info", fmt.Sprintf("[%d/%d] 演员 %s", idx+1, total, strings.Join(res.Actors, "、")))
 	}
 
-	if exists := findExisting(cfg.SaveDir, saveDir, name); exists != "" {
+	if exists := findExistingVersion(cfg.SaveDir, saveDir, name); exists != "" {
+		// 跳过时不做任何删除：这里的「已存在」只按文件名和大小判断，
+		// 上次下载中断留下的非空残件也算存在。此时若删普通版，可能把完整的
+		// 那份删掉、只剩残件。删除只在本次真的下完中文字幕版之后做。
 		r.patch(idx, func(it *Item) {
 			it.Status = StatusSkipped
 			it.Message = "已存在: " + filepath.Base(exists)
@@ -287,6 +291,12 @@ func (r *Runner) process(
 		return err
 	}
 
+	// 中文字幕版落地后，同名的普通版就是同一部片子的旧档，删掉它，
+	// 免得演员目录里同时躺着一份有字幕和一份没字幕的。
+	if plain, ok := plainName(name); ok {
+		r.dropPlainVideo(idx+1, total, cfg.SaveDir, saveDir, plain)
+	}
+
 	r.patch(idx, func(it *Item) {
 		it.Status = StatusDone
 		it.Percent = 100
@@ -296,6 +306,60 @@ func (r *Runner) process(
 	})
 	r.logf("info", fmt.Sprintf("[%d/%d] 完成 %s → %s", idx+1, total, name, saveDir))
 	return nil
+}
+
+// dropPlainVideo 删除与中文字幕版同名的普通版旧文件。
+//
+// 两道门槛，都是为了不把好文件删掉：
+//  1. 本地没有中文字幕版 —— 什么都不做；
+//  2. 中文字幕版明显小于普通版 —— 当作没下完（见 subtitleComplete）。
+func (r *Runner) dropPlainVideo(pos, total int, root, saveDir, plain string) {
+	plainPath := findExisting(root, saveDir, plain)
+	if plainPath == "" {
+		return // 没有普通版旧档，无需清理
+	}
+	subPath := existingVideo(saveDir, plain+chineseSubSuffix)
+	if subPath == "" {
+		subPath = findExisting(root, saveDir, plain+chineseSubSuffix)
+	}
+	if subPath == "" {
+		return
+	}
+	if !subtitleComplete(subPath, plainPath) {
+		r.logf("warn", fmt.Sprintf(
+			"[%d/%d] 中文字幕版可能未下载完整，暂不删除 %s", pos, total, plainPath))
+		return
+	}
+
+	removed, err := removePlainVideo(root, saveDir, plain)
+	for _, p := range removed {
+		r.logf("info", fmt.Sprintf("[%d/%d] 删除非中文字幕旧档 %s", pos, total, p))
+	}
+	if err != nil {
+		// 清理只是顺手收拾旧档，失败了不能让本次下载算失败。
+		r.logf("warn", fmt.Sprintf("[%d/%d] 清理非中文字幕旧档失败: %v", pos, total, err))
+	}
+}
+
+// subtitleMinRatio 是中文字幕版相对普通版的最小体积比（分母）。
+// 取 1/2：同片同长度，残件通常远小于正片，正常换版不会低于这个线。
+const subtitleMinRatio = 2
+
+// subtitleComplete 判断中文字幕版是不是完整成品。
+//
+// N_m3u8DL-RE 偶尔在混流失败后仍以 0 退出，留下一个非空的碎片文件：
+// 只按「文件存在且大小 > 0」判断，就会把完整的普通版删掉、只剩残件。
+// 这里拿普通版的大小当参照，残件不足一半就认为没下完，保留旧档。
+func subtitleComplete(subPath, plainPath string) bool {
+	sub, err := os.Stat(subPath)
+	if err != nil || sub.Size() <= 0 {
+		return false
+	}
+	plain, err := os.Stat(plainPath)
+	if err != nil || plain.Size() <= 0 {
+		return false
+	}
+	return sub.Size()*subtitleMinRatio >= plain.Size()
 }
 
 // ReadURLs 读取 txt，忽略空行与 # 注释，去重并保持原顺序。
@@ -318,16 +382,31 @@ func ReadURLs(path string) ([]string, error) {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		if seen[line] {
+		key := urlKey(line)
+		if seen[key] {
 			continue
 		}
-		seen[line] = true
+		seen[key] = true
 		out = append(out, line)
 	}
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("读取 txt 失败: %w", err)
 	}
 	return out, nil
+}
+
+// urlKey 生成去重用的键：去掉 fragment 与结尾斜杠，让
+// `.../videos/abc-123` 和 `.../videos/abc-123/` 算作同一行。
+//
+// 不动 query：不同参数可能真的指向不同资源，宁可多下一次也不误合并。
+func urlKey(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	u.Fragment = ""
+	u.Path = strings.TrimRight(u.Path, "/")
+	return u.String()
 }
 
 // buildItems 按已启用站点关键字分类。
@@ -344,6 +423,17 @@ func buildItems(cfg config.Config, urls []string) []Item {
 		items = append(items, it)
 	}
 	return items
+}
+
+// findExistingVersion 按「本地已有的可接受版本」查成品：
+// 普通版链接在中文字幕版已存在时也算下过，中文字幕版则只认自己。
+func findExistingVersion(root, saveDir, name string) string {
+	for _, n := range nameCandidates(name) {
+		if p := findExisting(root, saveDir, n); p != "" {
+			return p
+		}
+	}
+	return ""
 }
 
 // findExisting 找已经下好的同名成品文件：先看本次要写入的目录，
@@ -380,13 +470,90 @@ func findExisting(root, targetDir, name string) string {
 
 // existingVideo 检查保存目录下是否已有同名成品文件。
 func existingVideo(dir, name string) string {
-	for _, ext := range []string{".mp4", ".mkv", ".ts", ".flv", ".webm"} {
+	for _, ext := range videoExts {
 		p := filepath.Join(dir, name+ext)
 		if st, err := os.Stat(p); err == nil && !st.IsDir() && st.Size() > 0 {
 			return p
 		}
 	}
 	return ""
+}
+
+// videoExts 是成品视频可能的后缀，取决于 dl-re 的混流结果。
+var videoExts = []string{".mp4", ".mkv", ".ts", ".flv", ".webm"}
+
+// chineseSubSuffix 是中文（中文字幕）版的命名后缀，由爬取侧拼接。
+const chineseSubSuffix = "-C"
+
+// plainName 去掉中文字幕后缀，返回对应的普通版名字。
+// 不是中文字幕版时 ok=false。
+func plainName(name string) (string, bool) {
+	base, found := strings.CutSuffix(name, chineseSubSuffix)
+	base = strings.TrimSpace(base)
+	if !found || base == "" {
+		return "", false
+	}
+	return base, true
+}
+
+// nameCandidates 返回「本地哪些文件算这部片子已经下过」。
+//
+// 方向是有讲究的，中文字幕版和普通版不能一概而论：
+//   - 本次是普通版：本地有普通版或中文字幕版都算下过，没必要再下一份更差的。
+//   - 本次是中文字幕版：只认中文字幕版。本地只有普通版时要照下，
+//     下完再把普通版删掉（见 process 里的清理），否则升级永远进不来。
+func nameCandidates(name string) []string {
+	if _, ok := plainName(name); ok {
+		return []string{name}
+	}
+	return []string{name, name + chineseSubSuffix}
+}
+
+// removePlainVideo 删除普通版（不带 -C）的成品文件。
+//
+// 只有本地确实存在中文字幕版时才动手：否则删掉普通版等于把这部片子唯一的
+// 成品删没了。搜索范围与 findExisting 一致（目标演员目录 → 保存目录根 →
+// 其它一级子目录），只删成品视频文件（非目录、大小 > 0）。
+// 返回已删除的路径；第一个删除错误一并返回（其余继续尝试）。
+func removePlainVideo(root, saveDir, plain string) ([]string, error) {
+	if plain == "" || findExisting(root, saveDir, plain+chineseSubSuffix) == "" {
+		return nil, nil
+	}
+
+	dirs := []string{saveDir}
+	if saveDir != root {
+		dirs = append(dirs, root)
+	}
+	if entries, err := os.ReadDir(root); err == nil {
+		for _, e := range entries {
+			sub := filepath.Join(root, e.Name())
+			if e.IsDir() && sub != saveDir {
+				dirs = append(dirs, sub)
+			}
+		}
+	}
+
+	var (
+		removed  []string
+		firstErr error
+	)
+	for _, dir := range dirs {
+		for _, ext := range videoExts {
+			p := filepath.Join(dir, plain+ext)
+			st, err := os.Stat(p)
+			if err != nil || st.IsDir() || st.Size() == 0 {
+				continue
+			}
+			if err := os.Remove(p); err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			removed = append(removed, p)
+		}
+	}
+	return removed, firstErr
 }
 
 func (r *Runner) item(idx int) Item {
