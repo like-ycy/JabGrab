@@ -22,6 +22,12 @@ UA = (
     "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
 )
 
+# 页面打开后先等 10 秒再解题：jable/missav 都有 Cloudflare 验证，页面脚本要跑
+# 一会儿才把挑战过掉，等太短拿到的还是挑战页（真机上是这条链路最容易失败的地方）。
+PAGE_WAIT_SEC = 10
+# 解题后再等 5 秒，让标题、演员等 DOM 由页面 JS 渲染完再取源码。
+CAPTCHA_WAIT_SEC = 5
+
 
 class BaseScraper(ABC):
     def scrape(self, url: str) -> ScrapeResult:
@@ -39,12 +45,20 @@ class BaseScraper(ABC):
         if not m3u8_url or not video_name:
             return ScrapeResult(ok=False, error=f"未能获取有效信息: {url}")
 
+        # 演员名只用于归档目录，取不到不该拖垮整次下载：解析出错时按无演员处理。
+        try:
+            actors = self.extract_actors(html)
+        except Exception:
+            logger.exception("解析演员名出错，按无演员处理")
+            actors = []
+
         m3u8_url = self.fix_m3u8(m3u8_url)
         return ScrapeResult(
             ok=True,
             m3u8_url=m3u8_url,
             video_name=video_name,
             headers=self.extra_headers(m3u8_url),
+            actors=actors,
         )
 
     @staticmethod
@@ -61,9 +75,13 @@ class BaseScraper(ABC):
                 SB(uc=True, test=True, locale="en", headless=True) as sb,
             ):
                 sb.activate_cdp_mode(url)
-                sb.sleep(5)
-                sb.solve_captcha()
-                sb.sleep(5)
+                sb.sleep(PAGE_WAIT_SEC)
+                try:
+                    sb.solve_captcha()
+                except Exception:
+                    # 页面本来就没有验证码时，个别版本会抛错；能取到源码就不算失败
+                    logger.debug("solve_captcha 跳过", exc_info=True)
+                sb.sleep(CAPTCHA_WAIT_SEC)
                 return sb.get_page_source()
         except Exception:
             logger.exception("Selenium 获取 HTML 失败")
@@ -94,6 +112,10 @@ class BaseScraper(ABC):
     def extra_headers(self, m3u8_url: str) -> dict[str, str]:
         """钩子方法：子类可返回下载所需的额外请求头。"""
         return {}
+
+    def extract_actors(self, html: str) -> list[str]:
+        """钩子方法：子类可返回页面上的演员名，用于归档到演员子目录。"""
+        return []
 
     @abstractmethod
     def extract(self, html: str) -> tuple[str | None, str | None]:

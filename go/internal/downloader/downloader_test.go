@@ -373,3 +373,53 @@ func TestSafeName(t *testing.T) {
 		}
 	}
 }
+
+// 多个演员必须用横线连接：逗号在部分平台/工具链上并不总是安全字符。
+func TestActorDir(t *testing.T) {
+	cases := []struct {
+		actors []string
+		want   string
+	}{
+		{nil, ""},
+		{[]string{}, ""},
+		{[]string{"  "}, ""},
+		{[]string{"釈アリス"}, "釈アリス"},
+		{[]string{"釈アリス", "三上悠亜"}, "釈アリス-三上悠亜"},
+		{[]string{"釈アリス", "", "三上悠亜"}, "釈アリス-三上悠亜"},
+		// 名字里的路径分隔符要先清理，不能变成子目录层级
+		{[]string{"a/b"}, "a_b"},
+		// Windows 不允许目录名以点或空格结尾
+		{[]string{"釈アリス... "}, "釈アリス"},
+	}
+	for _, c := range cases {
+		if got := ActorDir(c.actors); got != c.want {
+			t.Fatalf("ActorDir(%q)=%q want=%q", c.actors, got, c.want)
+		}
+	}
+}
+
+// 大合辑动辄十几个演员，拼出来的目录名会超过文件系统单段 255 字节上限：
+// 必须截断（且保持同名单稳定、不同名单不撞）。
+func TestActorDirClampsLongNames(t *testing.T) {
+	long := make([]string, 50)
+	for i := range long {
+		long[i] = "演员姓名甲乙丙"
+	}
+	got := ActorDir(long)
+	if n := len([]rune(got)); n > actorDirMaxRunes+9 {
+		t.Fatalf("目录名仍然过长（%d 字符）: %q", n, got)
+	}
+	if n := len(got); n > 255 {
+		t.Fatalf("目录名超过 255 字节: %d", n)
+	}
+	if again := ActorDir(long); again != got {
+		t.Fatalf("同一份名单应稳定: %q != %q", got, again)
+	}
+
+	// 截断前缀相同的不同名单，必须靠哈希区分开
+	other := append([]string{}, long...)
+	other[len(other)-1] = "演员姓名甲乙丁"
+	if ActorDir(other) == got {
+		t.Fatalf("不同名单不应落到同一目录: %q", got)
+	}
+}

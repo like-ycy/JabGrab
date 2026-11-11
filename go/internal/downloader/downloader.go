@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"os"
 	"os/exec"
@@ -421,4 +422,42 @@ func SafeName(s string) string {
 		"\n", " ", "\r", " ", "\t", " ",
 	)
 	return strings.TrimSpace(replacer.Replace(s))
+}
+
+// ActorDir 把演员列表压成一级目录名，多个演员之间用 "-" 连接。
+//
+// 用横线而不是逗号：逗号在部分平台/工具链上是保留或需要转义的字符，
+// 横线在 Windows 与 macOS 上都不受限。名字本身的非法字符一并交给 SafeName。
+// 返回空串表示没有可用演员名，调用方应直接放在保存目录根下。
+func ActorDir(actors []string) string {
+	names := make([]string, 0, len(actors))
+	for _, a := range actors {
+		if name := SafeName(a); name != "" {
+			names = append(names, name)
+		}
+	}
+	// Windows 不允许目录名以点或空格结尾
+	joined := strings.Trim(strings.Join(names, "-"), " .")
+	return clampDirName(joined)
+}
+
+// actorDirMaxRunes 是演员目录名的字符上限。
+//
+// 文件系统单段名上限是 255 字节，而日文姓名 UTF-8 下 3 字节/字，
+// 大合辑类的作品动辄十几个演员，直接拼会超限——MkdirAll 报
+// "file name too long"，本来能下的片子会整个失败。
+const actorDirMaxRunes = 60
+
+// clampDirName 截断过长的目录名，并补一段短哈希保持区分度。
+//
+// 只截断不加哈希的话，不同演员组合可能落到同一个目录里；
+// 加上原名的哈希后，同一份演员名单每次算出的目录名仍然固定。
+func clampDirName(name string) string {
+	runes := []rune(name)
+	if len(runes) <= actorDirMaxRunes {
+		return name
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(name)) // fnv 的 Write 不会失败
+	return fmt.Sprintf("%s-%08x", string(runes[:actorDirMaxRunes]), h.Sum32())
 }

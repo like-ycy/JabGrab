@@ -24,6 +24,27 @@ func TestParseStdout(t *testing.T) {
 	}
 }
 
+// Python 侧新增的 actors 字段：有则原样带过来，无则保持空。
+func TestParseStdoutActors(t *testing.T) {
+	res, err := ParseStdout([]byte(
+		`{"ok": true, "m3u8_url": "u", "video_name": "ABC-123", "headers": {}, "actors": ["釈アリス", "三上悠亜"], "error": null}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Actors) != 2 || res.Actors[0] != "釈アリス" || res.Actors[1] != "三上悠亜" {
+		t.Fatalf("演员未解析: %+v", res.Actors)
+	}
+
+	// 老版本 Python 没有 actors 字段，不能因此报错
+	res, err = ParseStdout([]byte(`{"ok": true, "m3u8_url": "u", "video_name": "ABC-123"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Actors) != 0 {
+		t.Fatalf("无 actors 字段时应为空: %+v", res.Actors)
+	}
+}
+
 func TestParseStdoutError(t *testing.T) {
 	res, err := ParseStdout([]byte(`{"ok": false, "error": "获取网页源码失败"}`))
 	if err != nil {

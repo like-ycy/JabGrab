@@ -751,6 +751,8 @@ name = "jab-scrape"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "beautifulsoup4", version = "4.8.2", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "beautifulsoup4", version = "4.15.0", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "seleniumbase", version = "1.35.8", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }, marker = "python_full_version < '3.11'" },
     { name = "seleniumbase", version = "4.57.1", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }, marker = "python_full_version >= '3.11'" },
 ]
@@ -763,7 +765,10 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "seleniumbase" }]
+requires-dist = [
+    { name = "beautifulsoup4" },
+    { name = "seleniumbase" },
+]
 
 [package.metadata.requires-dev]
 dev = [

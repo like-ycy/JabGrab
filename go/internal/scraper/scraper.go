@@ -29,7 +29,9 @@ type Result struct {
 	M3U8URL   string            `json:"m3u8_url"`
 	VideoName string            `json:"video_name"`
 	Headers   map[string]string `json:"headers"`
-	Error     string            `json:"error"`
+	// Actors 是页面上的演员名，可能为空（missav 或页面上没有演员信息）
+	Actors []string `json:"actors"`
+	Error  string   `json:"error"`
 }
 
 // Scraper 按固定参数前缀执行爬取命令。

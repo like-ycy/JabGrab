@@ -104,6 +104,51 @@ func TestExistingVideo(t *testing.T) {
 	}
 }
 
+// 目标目录优先，其次回落到保存目录根与一级子目录（兼容改动前下好的 / 演员没解析出来的）。
+func TestFindExisting(t *testing.T) {
+	root := t.TempDir()
+	other := filepath.Join(root, "三上悠亜")
+	actorPath := filepath.Join(root, "釈アリス", "ABC-123.mp4")
+	rootPath := filepath.Join(root, "ABC-123.mp4")
+
+	if got := findExisting(root, filepath.Join(root, "釈アリス"), "ABC-123"); got != "" {
+		t.Fatalf("都没有时不应命中: %q", got)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(actorPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(actorPath, []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := findExisting(root, filepath.Join(root, "釈アリス"), "ABC-123"); got != actorPath {
+		t.Fatalf("应命中目标演员目录 got=%q want=%q", got, actorPath)
+	}
+	// 本次没解析出演员（actors 为空 → 目标是根目录）时，也要能发现演员目录里的成品，
+	// 否则同一部片子会被重复下载。
+	if got := findExisting(root, root, "ABC-123"); got != actorPath {
+		t.Fatalf("无演员时应回落到子目录 got=%q want=%q", got, actorPath)
+	}
+	// 解析出了别的演员，但片子已在另一个演员目录里
+	if err := os.MkdirAll(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := findExisting(root, other, "ABC-123"); got != actorPath {
+		t.Fatalf("应扫到其他演员目录 got=%q", got)
+	}
+
+	if err := os.WriteFile(rootPath, []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := findExisting(root, root, "ABC-123"); got != rootPath {
+		t.Fatalf("根目录优先于子目录 got=%q", got)
+	}
+	// 不同名字不能误命中
+	if got := findExisting(root, root, "ABC-123-C"); got != "" {
+		t.Fatalf("不应命中其他名字: %q", got)
+	}
+}
+
 func TestRunnerSnapshotInitial(t *testing.T) {
 	r := New(config.Default(), Hooks{})
 	st := r.Snapshot()

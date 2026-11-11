@@ -233,7 +233,17 @@ func (r *Runner) process(
 	}
 	r.patch(idx, func(it *Item) { it.Name = name; it.Message = "已拿到 m3u8" })
 
-	if exists := existingVideo(cfg.SaveDir, name); exists != "" {
+	// 有演员名就归档到「保存目录/演员名」下（多个演员用横线连接）；
+	// 取不到演员名（missav、或页面上没有演员信息）时直接放保存目录根，
+	// 不额外套一层「未知演员」，免得所有 missav 全挤在一个目录里。
+	actorDir := downloader.ActorDir(res.Actors)
+	saveDir := cfg.SaveDir
+	if actorDir != "" {
+		saveDir = filepath.Join(cfg.SaveDir, actorDir)
+		r.logf("info", fmt.Sprintf("[%d/%d] 演员 %s", idx+1, total, strings.Join(res.Actors, "、")))
+	}
+
+	if exists := findExisting(cfg.SaveDir, saveDir, name); exists != "" {
 		r.patch(idx, func(it *Item) {
 			it.Status = StatusSkipped
 			it.Message = "已存在: " + filepath.Base(exists)
@@ -250,7 +260,7 @@ func (r *Runner) process(
 
 	opts := downloader.Options{
 		Bin:        dlrPath,
-		SaveDir:    cfg.SaveDir,
+		SaveDir:    saveDir,
 		SaveName:   name,
 		Threads:    cfg.Download.Threads,
 		RetryCount: cfg.Download.RetryCount,
@@ -284,7 +294,7 @@ func (r *Runner) process(
 		it.Speed = ""
 		it.ETA = ""
 	})
-	r.logf("info", fmt.Sprintf("[%d/%d] 完成 %s", idx+1, total, name))
+	r.logf("info", fmt.Sprintf("[%d/%d] 完成 %s → %s", idx+1, total, name, saveDir))
 	return nil
 }
 
@@ -334,6 +344,38 @@ func buildItems(cfg config.Config, urls []string) []Item {
 		items = append(items, it)
 	}
 	return items
+}
+
+// findExisting 找已经下好的同名成品文件：先看本次要写入的目录，
+// 再看保存目录根，最后扫一遍一级子目录（演员目录）。
+//
+// 后两处是为了兼容「目录变了但片子没变」：改动前下好的文件还在根目录，
+// 以及本次没解析出演员（missav 或页面解析失败）、但片子其实已经躺在某个
+// 演员目录里。只查目标目录的话，这些都会被当成没下过而重新下一遍。
+func findExisting(root, targetDir, name string) string {
+	if p := existingVideo(targetDir, name); p != "" {
+		return p
+	}
+	if targetDir != root {
+		if p := existingVideo(root, name); p != "" {
+			return p
+		}
+	}
+
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		sub := filepath.Join(root, e.Name())
+		if !e.IsDir() || sub == targetDir {
+			continue
+		}
+		if p := existingVideo(sub, name); p != "" {
+			return p
+		}
+	}
+	return ""
 }
 
 // existingVideo 检查保存目录下是否已有同名成品文件。

@@ -35,6 +35,35 @@ MISSAV_HTML = (
     "</body></html>"
 )
 
+# 演员节点：全名只在 title 里，页面上只显示首字（真实样本见项目根 jable.html）
+JABLE_HTML_WITH_ACTORS = """
+<html><head><title>ABC-123 作品标题</title></head>
+<body>
+<div class="models">
+  <a class="model" href="https://jable.tv/models/hash1/">
+    <span class="placeholder rounded-circle" title="釈アリス">釈</span>
+  </a>
+  <a class="model" href="https://jable.tv/models/hash2/">
+    <span class="placeholder rounded-circle" title="三上悠亜">三</span>
+  </a>
+</div>
+<script>var hlsUrl = 'https://cdn.jable.tv/hls/abc-123.m3u8';</script>
+</body></html>
+"""
+
+# 页面 JS 初始化 tooltip 之后的形态：title 被搬空，只剩 data-original-title
+JABLE_HTML_TOOLTIP = """
+<html><head><title>ABC-123 作品标题</title></head>
+<body>
+<div class="models">
+  <a class="model" href="https://jable.tv/models/hash1/">
+    <span class="placeholder rounded-circle" data-original-title="釈アリス" title="">釈</span>
+  </a>
+</div>
+<script>var hlsUrl = 'https://cdn.jable.tv/hls/abc-123.m3u8';</script>
+</body></html>
+"""
+
 
 class TestJable:
     def test_extract_ok(self):
@@ -52,6 +81,32 @@ class TestJable:
 
     def test_missing_title(self):
         assert JableScraper().extract("<html></html>") == (None, None)
+
+    def test_extract_actors_multiple(self):
+        assert JableScraper().extract_actors(JABLE_HTML_WITH_ACTORS) == [
+            "釈アリス",
+            "三上悠亜",
+        ]
+
+    def test_extract_actors_tooltip_attr(self):
+        """JS 初始化 tooltip 后 title 被置空，要能读 data-original-title。"""
+        assert JableScraper().extract_actors(JABLE_HTML_TOOLTIP) == ["釈アリス"]
+
+    def test_extract_actors_dedup(self):
+        html = """
+        <div class="models">
+          <a class="model" href="/models/h1/"><span title="釈アリス">釈</span></a>
+          <a class="model" href="/models/h1/"><span title="釈アリス">釈</span></a>
+        </div>
+        """
+        assert JableScraper().extract_actors(html) == ["釈アリス"]
+
+    def test_extract_actors_absent(self):
+        assert JableScraper().extract_actors(JABLE_HTML) == []
+
+    def test_extract_actors_fallback_to_text(self):
+        html = '<div class="models"><a class="model">釈</a></div>'
+        assert JableScraper().extract_actors(html) == ["釈"]
 
 
 class TestMissAV:
@@ -126,6 +181,29 @@ class TestBaseScraper:
         assert result.ok is True
         assert result.video_name == "ABC-123"
         assert result.headers == {}
+        assert result.actors == []
+
+    def test_scrape_carries_actors(self, monkeypatch):
+        monkeypatch.setattr(
+            BaseScraper, "fetch_html", staticmethod(lambda url: JABLE_HTML_WITH_ACTORS)
+        )
+        result = JableScraper().scrape("https://example.com")
+        assert result.ok is True
+        assert result.actors == ["釈アリス", "三上悠亜"]
+
+    def test_actor_failure_does_not_break_scrape(self, monkeypatch):
+        """演员名只用于归档，解析炸了也不能让整次下载失败。"""
+
+        class Boom(JableScraper):
+            def extract_actors(self, html):
+                raise ValueError("boom")
+
+        monkeypatch.setattr(
+            BaseScraper, "fetch_html", staticmethod(lambda url: JABLE_HTML)
+        )
+        result = Boom().scrape("https://example.com")
+        assert result.ok is True
+        assert result.actors == []
 
 
 class TestScrapeResult:
@@ -136,6 +214,7 @@ class TestScrapeResult:
             "m3u8_url": "u",
             "video_name": "n",
             "headers": {},
+            "actors": [],
             "error": None,
         }
 
@@ -143,6 +222,7 @@ class TestScrapeResult:
         d = ScrapeResult(ok=False, error="e").to_dict()
         assert d["headers"] == {}
         assert d["m3u8_url"] is None
+        assert d["actors"] == []
 
 
 class TestFetchHtmlStdoutIsolation:
@@ -179,6 +259,75 @@ class TestFetchHtmlStdoutIsolation:
         assert html == "<html>ok</html>"
         assert captured.out == ""
         assert "starts" in captured.err
+
+
+class TestFetchHtmlTiming:
+    def test_waits_10s_before_captcha_and_5s_after(self, monkeypatch):
+        """打开页面先等 10 秒过 CF 验证，解题后再等 5 秒等 DOM 渲染。"""
+        from jab_scrape import scraper as mod
+
+        calls = []
+
+        class FakeSB:
+            def __init__(self, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def activate_cdp_mode(self, url):
+                calls.append(("open", url))
+
+            def sleep(self, seconds):
+                calls.append(("sleep", seconds))
+
+            def solve_captcha(self):
+                calls.append(("captcha", None))
+
+            def get_page_source(self):
+                return "<html/>"
+
+        monkeypatch.setattr(mod, "SB", FakeSB)
+        mod.BaseScraper.fetch_html("https://example.com")
+
+        assert calls == [
+            ("open", "https://example.com"),
+            ("sleep", 10),
+            ("captcha", None),
+            ("sleep", 5),
+        ]
+
+    def test_captcha_error_is_tolerated(self, monkeypatch):
+        """没有验证码时个别版本 solve_captcha 会抛错，不能因此拿不到源码。"""
+        from jab_scrape import scraper as mod
+
+        class FakeSB:
+            def __init__(self, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def activate_cdp_mode(self, url):
+                pass
+
+            def sleep(self, seconds):
+                pass
+
+            def solve_captcha(self):
+                raise RuntimeError("no captcha")
+
+            def get_page_source(self):
+                return "<html>ok</html>"
+
+        monkeypatch.setattr(mod, "SB", FakeSB)
+        assert mod.BaseScraper.fetch_html("https://example.com") == "<html>ok</html>"
 
 
 @pytest.mark.parametrize("source", ["jable", "missav"])
