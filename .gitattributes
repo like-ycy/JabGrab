@@ -1,0 +1,20 @@
+# 全仓库统一按 LF 检出。
+# Windows 上的 runner 与本地 Git for Windows 默认 core.autocrlf=true，
+# 会把 .sh / .args / .yml 检出成 CRLF：bash 会因 "set -euo pipefail\r" 直接报错，
+# PyInstaller 也会读到带 \r 的参数。这里用 eol=lf 覆盖该行为。
+* text=auto eol=lf
+
+# Windows 原生脚本保持 CRLF，符合其工具链习惯
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# 二进制资源，禁止任何换行转换
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.png binary
+*.ico binary
+*.icns binary
+*.zip binary

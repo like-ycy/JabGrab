@@ -1,0 +1,37 @@
+# PyInstaller 打包参数（每行一个参数，空行与 # 开头的行忽略）。
+#
+# 由 scripts/build.sh、scripts/build.ps1 以及 CI 共同读取，
+# 保证三个平台打包出来的 Python 程序完全一致。
+# 路径均相对于 python/ 目录。
+--noconfirm
+--clean
+--onedir
+--name
+jab-scrape
+--paths
+src
+--collect-all
+seleniumbase
+--collect-all
+mycdp
+--collect-all
+pdbp
+--exclude-module
+tkinter
+--exclude-module
+_tkinter
+--exclude-module
+pydoc
+--exclude-module
+pytest
+--exclude-module
+_pytest
+--exclude-module
+behave
+--distpath
+build/pyi/dist
+--workpath
+build/pyi/work
+--specpath
+build/pyi
+pyinstaller_entry.py

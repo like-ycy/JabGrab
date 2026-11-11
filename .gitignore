@@ -16,7 +16,11 @@ __pycache__/
 *.py[cod]
 
 # ---------- Go / Wails ----------
-go/build/
+# Wails 构建目录整体忽略（bin/ 产物、自动生成的平台资源），
+# 但 appicon.png 是图标源文件：mac 的 icns 与 win 的 ico 都由它生成，
+# 不入库的话 CI 全新 clone 构建出来的包会退回 Wails 默认图标。
+go/build/*
+!go/build/appicon.png
 # Wails 生成的 JS 绑定，前端直接用 window.go 调用，无需纳入版本管理
 go/frontend/wailsjs/
 
