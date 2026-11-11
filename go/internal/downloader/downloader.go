@@ -3,6 +3,7 @@ package downloader
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"hash/fnv"
@@ -269,10 +270,17 @@ func (o Options) Run(
 		}
 	}
 
-	done := make(chan struct{}, 2)
+	done := make(chan error, 2)
+	readOutput := func(r io.Reader, emit func(string)) {
+		err := splitLines(r, emit)
+		if err != nil {
+			// 读协程退出后不能继续让子进程写满管道，否则 Wait 会一直阻塞。
+			_ = proc.Kill(cmd)
+		}
+		done <- err
+	}
 	go func() {
-		defer func() { done <- struct{}{} }()
-		_ = splitLines(stdout, func(line string) {
+		readOutput(stdout, func(line string) {
 			progressFn(line)
 			if !isProgressLine(line) {
 				tail.push(line)
@@ -281,19 +289,23 @@ func (o Options) Run(
 		})
 	}()
 	go func() {
-		defer func() { done <- struct{}{} }()
-		_ = splitLines(stderr, func(line string) {
+		readOutput(stderr, func(line string) {
 			tail.push(line)
 			emit(line)
 		})
 	}()
 
-	<-done
-	<-done
+	readErr, otherReadErr := <-done, <-done
 	waitErr := cmd.Wait()
 
 	if ctx.Err() != nil {
 		return context.Canceled
+	}
+	if readErr == nil {
+		readErr = otherReadErr
+	}
+	if readErr != nil {
+		return fmt.Errorf("读取下载器日志失败: %w", readErr)
 	}
 	if waitErr != nil {
 		msg := tail.summary()
@@ -351,32 +363,28 @@ func isProgressLine(line string) bool {
 // splitLines 按 \r 与 \n 切分。dl-re 重绘进度条用的是回车符，
 // 只按 \n 切会把整段进度糊成一行。
 func splitLines(r io.Reader, emit func(string)) error {
-	br := bufio.NewReaderSize(r, 64*1024)
-	var sb strings.Builder
-	for {
-		ch, _, err := br.ReadRune()
-		if err != nil {
-			if sb.Len() > 0 {
-				emit(sb.String())
-			}
-			if err == io.EOF {
-				return nil
-			}
-			return err
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	sc.Split(func(data []byte, atEOF bool) (int, []byte, error) {
+		if i := bytes.IndexAny(data, "\r\n"); i >= 0 {
+			return i + 1, data[:i], nil
 		}
-		if ch == '\r' || ch == '\n' {
-			if sb.Len() > 0 {
-				emit(sb.String())
-				sb.Reset()
-			}
+		if atEOF && len(data) > 0 {
+			return len(data), data, nil
+		}
+		return 0, nil, nil
+	})
+	for sc.Scan() {
+		if len(sc.Bytes()) == 0 {
 			continue
 		}
-		sb.WriteRune(ch)
-		if sb.Len() >= 8192 {
-			emit(sb.String())
-			sb.Reset()
+		line, err := decodeOutput(sc.Bytes())
+		if err != nil {
+			return err
 		}
+		emit(line)
 	}
+	return sc.Err()
 }
 
 // ring 保存最后 N 行，用于错误摘要。

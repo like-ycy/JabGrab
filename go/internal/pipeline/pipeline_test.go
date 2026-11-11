@@ -65,18 +65,21 @@ func TestBuildItems(t *testing.T) {
 		"https://jable.tv/videos/a/",
 		"https://missav.com/en/b",
 		"https://other.com/c",
+		"https://jable.tv/videos/d/",
 	}
 	items := buildItems(cfg, urls)
 
+	if len(items) != 2 {
+		t.Fatalf("禁用站点和不匹配的 URL 不应进入任务列表: %+v", items)
+	}
 	if items[0].Site != "jable" || items[0].Status != StatusPending {
 		t.Fatalf("jable 应入队: %+v", items[0])
 	}
-	// 站点被禁用 → 忽略
-	if items[1].Status != StatusIgnored {
-		t.Fatalf("禁用的 missav 应被忽略: %+v", items[1])
+	if items[0].URL != urls[0] || items[1].URL != urls[3] {
+		t.Fatalf("过滤后应保持可处理 URL 的原顺序: %+v", items)
 	}
-	if items[2].Status != StatusIgnored {
-		t.Fatalf("不匹配的 URL 应被忽略: %+v", items[2])
+	if got := buildItems(cfg, urls[1:3]); len(got) != 0 {
+		t.Fatalf("全部忽略时应为空列表: %+v", got)
 	}
 }
 

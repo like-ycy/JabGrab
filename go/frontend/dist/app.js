@@ -9,7 +9,6 @@ const STATUS_TEXT = {
     downloading: "下载中",
     done: "完成",
     skipped: "已跳过",
-    ignored: "已忽略",
     failed: "失败",
     cancelled: "已取消",
 };
@@ -19,6 +18,8 @@ const el = (id) => document.getElementById(id);
 let draft = null; // 设置页正在编辑的配置副本
 let lastState = { running: false, index: 0, total: 0, items: [] };
 let logCount = 0;
+let followLog = true;
+let logScroll = { top: 0, remainder: 0 };
 const LOG_LIMIT = 2000;
 
 /* ---------- 启动 ---------- */
@@ -26,6 +27,7 @@ const LOG_LIMIT = 2000;
 async function boot() {
     bindTabs();
     bindButtons();
+    bindPaneDivider();
 
     if (!api()) {
         appendLog({ level: "error", text: "未检测到后端绑定，请通过 JabGrab 程序启动本界面。" });
@@ -72,12 +74,67 @@ function normalize(cfg) {
 function bindTabs() {
     document.querySelectorAll(".tab").forEach((btn) => {
         btn.addEventListener("click", () => {
+            const log = el("log");
+            if (log.clientHeight > 0) followLog = logAtBottom(log);
             document.querySelectorAll(".tab").forEach((b) => b.classList.remove("active"));
             document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
             btn.classList.add("active");
             el("view-" + btn.dataset.view).classList.add("active");
+            if (log.clientHeight > 0 && followLog) log.scrollTop = log.scrollHeight;
         });
     });
+}
+
+/* ---------- 列表与日志分隔条 ---------- */
+
+function bindPaneDivider() {
+    const panes = el("taskPanes");
+    const divider = el("paneDivider");
+    const logPanel = el("logPanel");
+    let logHeight = 190;
+    let drag = null;
+
+    const resize = (height) => {
+        if (panes.clientHeight === 0) return;
+        const available = panes.clientHeight - divider.offsetHeight;
+        const max = Math.max(0, available - 120);
+        const min = Math.min(90, max);
+        logHeight = Math.max(min, Math.min(max, height));
+        logPanel.style.flexBasis = logHeight + "px";
+        divider.setAttribute("aria-valuemin", String(Math.round(min)));
+        divider.setAttribute("aria-valuemax", String(Math.round(max)));
+        divider.setAttribute("aria-valuenow", String(Math.round(logHeight)));
+        divider.setAttribute("aria-valuetext", `运行日志高度 ${Math.round(logHeight)} 像素`);
+    };
+
+    divider.addEventListener("pointerdown", (event) => {
+        if (event.button !== 0 || drag) return;
+        event.preventDefault();
+        divider.focus();
+        drag = { id: event.pointerId, y: event.clientY, height: logPanel.offsetHeight };
+        divider.setPointerCapture(event.pointerId);
+        document.body.classList.add("resizing");
+    });
+    divider.addEventListener("pointermove", (event) => {
+        if (!drag || drag.id !== event.pointerId) return;
+        resize(drag.height + drag.y - event.clientY);
+    });
+    const stopDrag = (event) => {
+        if (!drag || drag.id !== event.pointerId) return;
+        drag = null;
+        document.body.classList.remove("resizing");
+        if (divider.hasPointerCapture(event.pointerId)) divider.releasePointerCapture(event.pointerId);
+    };
+    divider.addEventListener("pointerup", stopDrag);
+    divider.addEventListener("pointercancel", stopDrag);
+    divider.addEventListener("lostpointercapture", stopDrag);
+    divider.addEventListener("keydown", (event) => {
+        if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+        event.preventDefault();
+        resize(logHeight + (event.key === "ArrowUp" ? 20 : -20));
+    });
+    new ResizeObserver(() => resize(logHeight)).observe(panes);
+    resize(logHeight);
 }
 
 /* ---------- 环境与自检 ---------- */
@@ -122,17 +179,16 @@ function renderState(s) {
     const body = el("taskBody");
 
     if (items.length === 0) {
-        body.innerHTML = '<tr class="empty"><td colspan="6">还没有任务，选择 txt 后点“开始”</td></tr>';
+        body.innerHTML = '<tr class="empty"><td colspan="6">没有可处理的任务，请选择 txt 并确认已启用站点</td></tr>';
         setOverall(0);
         el("summaryText").textContent = "等待开始";
         el("summaryDetail").textContent = "";
-        setRunning(false);
+        setRunning(!!s.running);
         return;
     }
 
     const html = items.map((it, i) => {
         const st = it.status || "pending";
-        const done = ["done", "skipped", "ignored", "failed", "cancelled"].includes(st);
         const pct = st === "done" ? 100 : Number(it.percent || 0);
         const showBar = st === "downloading" || st === "done" || pct > 0;
         const name = it.name || "";
@@ -171,7 +227,7 @@ function renderState(s) {
     let current = null;
     for (const it of items) {
         const st = it.status || "pending";
-        if (["done", "skipped", "ignored"].includes(st)) {
+        if (["done", "skipped"].includes(st)) {
             acc += 1;
             finished += 1;
         } else if (st === "failed" || st === "cancelled") {
@@ -210,19 +266,34 @@ function setRunning(running) {
 
 /* ---------- 日志 ---------- */
 
+function logAtBottom(log) {
+    return log.scrollHeight - log.clientHeight - log.scrollTop <= 24;
+}
+
 function appendLog(line) {
     const pre = el("log");
+    const visible = pre.clientHeight > 0;
+    const scrollTop = pre.scrollTop;
+    if (visible) followLog = logAtBottom(pre);
+    if (scrollTop !== logScroll.top) logScroll.remainder = 0;
     const div = document.createElement("div");
     div.className = "l-" + (line.level || "info");
     div.textContent = line.text || "";
     pre.appendChild(div);
     logCount++;
 
+    let removedHeight = 0;
     while (logCount > LOG_LIMIT && pre.firstChild) {
+        removedHeight += pre.firstChild.getBoundingClientRect().height;
         pre.removeChild(pre.firstChild);
         logCount--;
     }
-    pre.scrollTop = pre.scrollHeight;
+    if (visible) {
+        // 部分 WebView 的 scrollTop 会取整，保留小数余量，避免持续裁剪时累积偏移。
+        const target = followLog ? pre.scrollHeight : Math.max(0, scrollTop + logScroll.remainder - removedHeight);
+        pre.scrollTop = target;
+        logScroll = { top: pre.scrollTop, remainder: followLog ? 0 : target - pre.scrollTop };
+    }
 }
 
 /* ---------- 设置页 ---------- */
@@ -347,6 +418,8 @@ function bindButtons() {
     el("btnClearLog").addEventListener("click", () => {
         el("log").innerHTML = "";
         logCount = 0;
+        followLog = true;
+        logScroll = { top: 0, remainder: 0 };
     });
 
     document.querySelectorAll("[data-pick]").forEach((btn) => {

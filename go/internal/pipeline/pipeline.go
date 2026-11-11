@@ -29,7 +29,6 @@ const (
 	StatusDownloading Status = "downloading" // 下载中
 	StatusDone        Status = "done"        // 完成
 	StatusSkipped     Status = "skipped"     // 已存在，跳过
-	StatusIgnored     Status = "ignored"     // 未匹配任何启用站点
 	StatusFailed      Status = "failed"      // 失败
 	StatusCancelled   Status = "cancelled"   // 已取消
 )
@@ -143,8 +142,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.mu.Unlock()
 	r.emitState(st)
 
+	r.logf("info", fmt.Sprintf("扫描到 %d 条去重 URL，可处理 %d 条，忽略 %d 条", len(urls), len(items), len(urls)-len(items)))
 	if len(items) == 0 {
-		r.logf("warn", "txt 里没有可处理的 URL")
+		r.logf("warn", "txt 里没有匹配已启用站点的 URL")
 		return nil
 	}
 
@@ -176,9 +176,6 @@ func (r *Runner) Run(ctx context.Context) error {
 		if runCtx.Err() != nil {
 			r.markRemaining(i, StatusCancelled, "已取消")
 			break
-		}
-		if items[i].Status == StatusIgnored {
-			continue
 		}
 		r.updateIndex(i + 1)
 
@@ -409,18 +406,15 @@ func urlKey(raw string) string {
 	return u.String()
 }
 
-// buildItems 按已启用站点关键字分类。
+// buildItems 只将匹配已启用站点的 URL 加入队列，列表与进度共用同一批任务。
 func buildItems(cfg config.Config, urls []string) []Item {
 	items := make([]Item, 0, len(urls))
 	for _, u := range urls {
-		it := Item{URL: u, Status: StatusPending}
-		if site, ok := cfg.MatchSite(u); ok {
-			it.Site = site
-		} else {
-			it.Status = StatusIgnored
-			it.Message = "未匹配任何已启用站点"
+		site, ok := cfg.MatchSite(u)
+		if !ok {
+			continue
 		}
-		items = append(items, it)
+		items = append(items, Item{URL: u, Site: site, Status: StatusPending})
 	}
 	return items
 }

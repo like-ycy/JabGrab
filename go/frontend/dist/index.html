@@ -47,32 +47,38 @@
                 </div>
             </div>
 
-            <div class="card list-card">
-                <table class="task-table">
-                    <thead>
-                        <tr>
-                            <th class="col-idx">#</th>
-                            <th class="col-name">名称 / URL</th>
-                            <th class="col-site">站点</th>
-                            <th class="col-status">状态</th>
-                            <th class="col-progress">进度</th>
-                            <th class="col-speed">速度</th>
-                        </tr>
-                    </thead>
-                    <tbody id="taskBody">
-                        <tr class="empty">
-                            <td colspan="6">还没有任务，选择 txt 后点“开始”</td>
-                        </tr>
-                    </tbody>
-                </table>
-            </div>
-
-            <div class="card log-card">
-                <div class="log-head">
-                    <span>运行日志</span>
-                    <button id="btnClearLog" class="ghost">清空</button>
+            <div class="task-panes" id="taskPanes">
+                <div class="card list-card" id="taskList">
+                    <table class="task-table">
+                        <thead>
+                            <tr>
+                                <th class="col-idx">#</th>
+                                <th class="col-name">名称 / URL</th>
+                                <th class="col-site">站点</th>
+                                <th class="col-status">状态</th>
+                                <th class="col-progress">进度</th>
+                                <th class="col-speed">速度</th>
+                            </tr>
+                        </thead>
+                        <tbody id="taskBody">
+                            <tr class="empty">
+                                <td colspan="6">还没有任务，选择 txt 后点“开始”</td>
+                            </tr>
+                        </tbody>
+                    </table>
                 </div>
-                <pre id="log"></pre>
+
+                <div class="pane-divider" id="paneDivider" role="separator" tabindex="0"
+                     aria-label="调整 URL 列表与运行日志高度" aria-orientation="horizontal"
+                     aria-controls="logPanel" title="上下拖动调整大小，也可使用方向键"></div>
+
+                <div class="card log-card" id="logPanel">
+                    <div class="log-head">
+                        <span>运行日志</span>
+                        <button id="btnClearLog" class="ghost">清空</button>
+                    </div>
+                    <pre id="log"></pre>
+                </div>
             </div>
         </section>
 

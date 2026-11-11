@@ -16,6 +16,7 @@ import (
 	"jabgrab/internal/downloader"
 	"jabgrab/internal/locate"
 	"jabgrab/internal/pipeline"
+	"jabgrab/internal/proc"
 )
 
 // LogLine 是推给前端的一行日志。
@@ -255,7 +256,10 @@ func (a *App) dlrVersion(bin string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	out, err := exec.CommandContext(ctx, bin, "--version").Output()
+	cmd := exec.CommandContext(ctx, bin, "--version")
+	proc.Prepare(cmd)
+	cmd.Cancel = func() error { return proc.Kill(cmd) }
+	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}
