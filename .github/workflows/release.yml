@@ -63,6 +63,11 @@ jobs:
       - name: 打包 Python 爬取程序
         run: bash scripts/build-py.sh
 
+      # 冻结产物冒烟：--help 会走完整条 import 链（含 seleniumbase），能在几分钟的
+      # wails 构建之前就暴露「资源没收进 _internal」这类只在运行时才发作的问题。
+      - name: 侧车冒烟测试
+        run: ./python/build/pyi/dist/jab-scrape/jab-scrape --help >/dev/null
+
       - name: 构建 macOS 应用
         working-directory: go
         run: |
@@ -146,6 +151,19 @@ jobs:
         shell: bash
         run: bash scripts/build-py.sh
 
+      # 冻结产物冒烟：--help 会走完整条 import 链（含 seleniumbase）。
+      # 两个 PYTHON* 变量不是可有可无的：Windows 控制台默认 ANSI 代码页编不了中文，
+      # --help 里的中文说明会直接 UnicodeEncodeError —— 这正是运行时 jab-scrape
+      # 输出中文 JSON 遇到的同一个坑（Go 侧在 internal/scraper 里已强制 UTF-8）。
+      - name: 侧车冒烟测试
+        shell: pwsh
+        env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: utf-8
+        run: |
+          & 'python\build\pyi\dist\jab-scrape\jab-scrape.exe' --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "jab-scrape --help 退出码 $LASTEXITCODE" }
+
       - name: 构建 Windows 应用
         shell: bash
         working-directory: go
@@ -164,9 +182,22 @@ jobs:
           Copy-Item 'go/build/bin/jabgrab.exe' dist
           Copy-Item 'go/third_party/N_m3u8DL-RE.exe' dist
           Copy-Item 'python/build/pyi/dist/jab-scrape/*' dist -Recurse -Force
-          # 三件套能被互相定位才算打包合格
-          & "$PWD\dist\jabgrab.exe" --selftest
-          if ($LASTEXITCODE -ne 0) { throw '自检未通过' }
+
+          # 先做文件系统断言：三件套必须平铺在同一层，_internal 与 jab-scrape.exe 同级。
+          # 结构错了用户侧表现为「找不到下载器/爬取组件」，而日志一片绿，所以在这里拦。
+          foreach ($p in @('dist\jabgrab.exe', 'dist\N_m3u8DL-RE.exe',
+                           'dist\jab-scrape.exe', 'dist\_internal')) {
+            if (-not (Test-Path $p)) { throw "分发目录缺少：$p" }
+          }
+
+          # 再从最终位置真跑一次。
+          # 必须用 Start-Process -Wait：wails 生产构建会给 Windows 产物加 -H windowsgui
+          # （wails v2 pkg/commands/build/base.go），产物是 GUI 子系统程序，PowerShell 用
+          # & 调用不会等待它退出，$LASTEXITCODE 保持初始的 $null，而 $null -ne 0 为真，
+          # 于是自检明明通过也会被误判成失败。
+          $proc = Start-Process -FilePath "$PWD\dist\jabgrab.exe" -ArgumentList '--selftest' `
+            -NoNewWindow -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "自检退出码 $($proc.ExitCode)" }
 
       - name: 打包 Windows 发行包
         # 在 dist 目录内压缩，保证 zip 根目录就是 jabgrab.exe / jab-scrape.exe / _internal

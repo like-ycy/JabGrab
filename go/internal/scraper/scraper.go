@@ -13,6 +13,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -65,6 +66,7 @@ func (s Scraper) Scrape(ctx context.Context, url, source string) (Result, error)
 	}
 	cmd := exec.CommandContext(ctx, bin, args...) //nolint:gosec // 路径来自配置，属预期行为
 	cmd.Dir = s.Dir
+	cmd.Env = utf8Env()
 	proc.Prepare(cmd)
 	// CommandContext 默认只杀主进程，而爬取会拉起浏览器等子进程：
 	// 必须自己把整组杀掉，否则超时/取消后残留进程还攥着 stdout，Wait 会一直阻塞。
@@ -139,6 +141,25 @@ func ParseStdout(b []byte) (Result, error) {
 		return res, nil
 	}
 	return Result{}, fmt.Errorf("爬取进程没有输出有效 JSON")
+}
+
+// utf8Env 在继承环境的基础上强制 Python 子进程用 UTF-8 读写。
+//
+// jab-scrape 打印的是 ensure_ascii=False 的 JSON，中文标题原样输出；而 Python 在
+// Windows 上按控制台 ANSI 代码页编码 stdout（中文系统 cp936、英文系统 cp1252），
+// 遇到编不了的字符会直接 UnicodeEncodeError，整次爬取失败——而且只在中文标题时
+// 才发作，很容易漏测。macOS/Linux 本来就是 UTF-8，这里统一成同一行为。
+func utf8Env() []string {
+	env := os.Environ()
+	out := make([]string, 0, len(env)+2)
+	for _, kv := range env {
+		// 已存在的同名变量先剔除，避免同一个 key 出现两次时依赖平台的取用顺序
+		if strings.HasPrefix(kv, "PYTHONUTF8=") || strings.HasPrefix(kv, "PYTHONIOENCODING=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, "PYTHONUTF8=1", "PYTHONIOENCODING=utf-8")
 }
 
 // ring 保存最后 N 行，用于错误摘要。

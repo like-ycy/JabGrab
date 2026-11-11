@@ -95,9 +95,13 @@ Copy-Item (Join-Path $PyBuild 'dist\jab-scrape\*') $Dist -Recurse -Force
 Write-Host '    → dist\jabgrab.exe + N_m3u8DL-RE.exe + jab-scrape.exe'
 
 Step '4/4 自检'
-& (Join-Path $Dist 'jabgrab.exe') --selftest
-if ($LASTEXITCODE -ne 0) {
-    Write-Warning '自检未通过，检查 dist 里三件套是否齐全'
+# 必须 Start-Process -Wait：wails 生产构建给 Windows 产物加了 -H windowsgui，
+# 是 GUI 子系统程序，用 & 调用时 PowerShell 不会等待退出，$LASTEXITCODE 保持
+# $null，会被误判成失败。
+$selftest = Start-Process -FilePath (Join-Path $Dist 'jabgrab.exe') `
+    -ArgumentList '--selftest' -NoNewWindow -Wait -PassThru
+if ($selftest.ExitCode -ne 0) {
+    Write-Warning "自检退出码 $($selftest.ExitCode)，检查 dist 里三件套是否齐全"
 }
 
 $total = [math]::Round(((Get-ChildItem $Dist -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), 1)
