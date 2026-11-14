@@ -360,31 +360,127 @@ func isProgressLine(line string) bool {
 	return ok
 }
 
-// splitLines 按 \r 与 \n 切分。dl-re 重绘进度条用的是回车符，
-// 只按 \n 切会把整段进度糊成一行。
+// flushBytes 是「没有分隔符时先吐出去」的字节阈值。
+//
+// dl-re 在真实控制台下用 \r 原地重绘进度条；一旦 stdout 被重定向（本应用用的
+// 就是管道），它既不打 \r 也不打 \n，整段进度帧会首尾相接，连成一条永远等不到
+// 结尾的「超长行」，直到进程退出才读到。只按分隔符切分，进度就会一直停在 0%，
+// 进程结束时一次性跳到 100%。所以攒够这么多字节就先增量吐一刀。
+const flushBytes = 4 * 1024
+
+// splitLines 按 \r 与 \n 切分，并在迟迟没有分隔符时按 flushBytes 增量吐出。
+//
+// 两个约束同时要满足：
+//  1. 分隔符优先——有 \r 或 \n 就按行切，日志与进度帧都保持原样；
+//  2. 不许憋着——重定向下进度帧不带任何分隔符，必须有大小阈值兜底，
+//     否则整段输出要等到 EOF 才交出去，进度条就永远停在 0%。
 func splitLines(r io.Reader, emit func(string)) error {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	sc.Split(func(data []byte, atEOF bool) (int, []byte, error) {
-		if i := bytes.IndexAny(data, "\r\n"); i >= 0 {
-			return i + 1, data[:i], nil
+	br := bufio.NewReaderSize(r, 64*1024)
+	readBuf := make([]byte, 32*1024)
+	var pending []byte
+	for {
+		n, readErr := br.Read(readBuf)
+		if n > 0 {
+			pending = append(pending, readBuf[:n]...)
+			rest, err := drainLines(pending, emit)
+			if err != nil {
+				return err
+			}
+			pending = rest
 		}
-		if atEOF && len(data) > 0 {
-			return len(data), data, nil
+		if readErr == io.EOF {
+			if len(pending) == 0 {
+				return nil
+			}
+			return emitLine(pending, emit)
 		}
-		return 0, nil, nil
-	})
-	for sc.Scan() {
-		if len(sc.Bytes()) == 0 {
+		if readErr != nil {
+			return readErr
+		}
+	}
+}
+
+// drainLines 从 pending 里切出能切的段并 emit，返回剩下的尾巴。
+func drainLines(pending []byte, emit func(string)) ([]byte, error) {
+	for {
+		if i := bytes.IndexAny(pending, "\r\n"); i >= 0 {
+			if i > 0 {
+				if err := emitLine(pending[:i], emit); err != nil {
+					return nil, err
+				}
+			}
+			pending = pending[i+1:]
 			continue
 		}
-		line, err := decodeOutput(sc.Bytes())
-		if err != nil {
-			return err
+		if len(pending) < flushBytes {
+			return pending, nil
 		}
-		emit(line)
+		cut := flushCut(pending)
+		if err := emitLine(pending[:cut], emit); err != nil {
+			return nil, err
+		}
+		pending = pending[cut:]
 	}
-	return sc.Err()
+}
+
+// flushAnchorWindow 是「切点回退到百分比」的最大回退距离。
+// 真实进度帧之间约 160 字节；超过这个距离说明是一段没有进度的普通日志，
+// 不必再为对齐帧结构让步。
+const flushAnchorWindow = 512
+
+// flushCut 计算增量切点：切在最后一个完整帧的末尾。
+//
+// 进度帧之间没有任何分隔符，切在帧中间会把同一帧的字段劈到两段里：
+//   - 分片数与百分比被劈开时，前一段会解析出「上一帧的百分比 + 这一帧的分片数」
+//     这种张冠李戴的结果，后一段又因为没有分片数而解析不出最后一帧（例如 100%）；
+//   - 百分比之后的体积、速度被劈开时，百分比来自新帧、体积还停在上一帧。
+//
+// 帧的结构是「… 分片/总数 百分比 体积 速度 剩余时间」，其中剩余时间与速度都可能
+// 缺席，所以以最后一个百分比为锚，连上它后面第一个收尾字段（剩余时间，没有就是
+// 速度）作为切点。切在帧末，被跳过的帧整帧留在 pending 里等下一次读出，两段都不
+// 会出现跨帧字段。
+func flushCut(pending []byte) int {
+	limit := flushBytes
+	if limit > len(pending) {
+		limit = len(pending)
+	}
+	window := pending[:limit]
+
+	// 剩余时间、速度、百分比都是 ASCII，紧跟其后切一定落在字符边界上。
+	i := bytes.LastIndexByte(window, '%')
+	if i < 0 || limit-i > flushAnchorWindow {
+		return safeCut(pending, limit)
+	}
+	// 从最后一个百分比往前试：窗口刚好截断在帧中间时，本帧的收尾字段还没读到，
+	// 退到上一帧再看，绝不切在半帧上。
+	for ; i >= 0; i = bytes.LastIndexByte(window[:i], '%') {
+		rest := window[i+1:]
+		if e := etaRe.FindIndex(rest); e != nil {
+			return i + 1 + e[1]
+		}
+		if s := speedRe.FindIndex(rest); s != nil {
+			end := i + 1 + s[1]
+			// 速度后面通常还跟着剩余时间（至少 8 字节）。贴着窗口末尾说明还没读全，
+			// 这时不能把速度当帧尾，退一帧再切。
+			if limit-end >= minETALen {
+				return end
+			}
+		}
+	}
+	return safeCut(pending, limit)
+}
+
+// minETALen 是「hh:mm:ss」的最小长度，用于判断速度后面是否还有剩余时间没读全。
+const minETALen = 8
+
+// emitLine 解码一段原始字节并交出去。
+func emitLine(raw []byte, emit func(string)) error {
+	line, err := decodeOutput(raw)
+	if err != nil {
+		return err
+	}
+	emit(line)
+	return nil
 }
 
 // ring 保存最后 N 行，用于错误摘要。

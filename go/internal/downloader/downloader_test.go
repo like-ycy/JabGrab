@@ -2,6 +2,8 @@ package downloader
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -9,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
+	"unicode/utf8"
 )
 
 // 来自真实 Windows 版 dl-re 的输出
@@ -422,4 +426,204 @@ func TestActorDirClampsLongNames(t *testing.T) {
 	if ActorDir(other) == got {
 		t.Fatalf("不同名单不应落到同一目录: %q", got)
 	}
+}
+
+// stdout 被重定向后，dl-re 的进度帧不带任何分隔符（实测 \r 与 \n 都是 0 个），
+// 整段进度会连成一条等不到结尾的超长行。必须按字节阈值增量吐出，
+// 否则整段输出要等到 EOF 才交出去，界面进度条就会一直停在 0%（本次回归点）。
+func TestSplitLinesFlushesProgressWithoutDelimiter(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer pr.Close()
+
+	var (
+		mu   sync.Mutex
+		got  []string
+		live = make(chan string, 128)
+	)
+	done := make(chan error, 1)
+	go func() {
+		done <- splitLines(pr, func(s string) {
+			mu.Lock()
+			got = append(got, s)
+			mu.Unlock()
+			select {
+			case live <- s:
+			default:
+			}
+		})
+	}()
+
+	frame := func(pct int) string {
+		return fmt.Sprintf("Vid 1920x1080 | 6221 Kbps %s %d/100 %d.00%% 68.64MB/732.18MB 3.60MBps 00:03:31",
+			strings.Repeat("━", 30), pct, pct)
+	}
+	frames := flushBytes/len(frame(1)) + 8
+
+	written := make(chan struct{})
+	go func() {
+		defer close(written)
+		for i := 1; i <= frames; i++ {
+			if _, err := pw.Write([]byte(frame(i))); err != nil {
+				return
+			}
+		}
+	}()
+
+	// 攒够 flushBytes 就应该先吐出一段，而不是憋到 close。
+	select {
+	case line := <-live:
+		if _, ok := ParseProgress(line); !ok {
+			t.Fatalf("增量吐出的片段应能解析出进度: %q", line)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("没有分隔符时必须增量吐出进度帧，实际一直等到 EOF（进度会停在 0%）")
+	}
+
+	<-written
+	if err := pw.Close(); err != nil {
+		t.Fatalf("关闭管道失败: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("splitLines 出错: %v", err)
+	}
+
+	mu.Lock()
+	lines := append([]string(nil), got...)
+	mu.Unlock()
+	if len(lines) < 2 {
+		t.Fatalf("整段进度应被切成多段增量输出，实际只有 %d 段", len(lines))
+	}
+	last, ok := ParseProgress(lines[len(lines)-1])
+	if !ok || last.Percent != float64(frames) {
+		t.Fatalf("最后一段应带上最新一帧进度 %d%%，实际: %q", frames, lines[len(lines)-1])
+	}
+}
+
+// 增量切点必须落在字符边界，否则长段中文会被劈成半个字、解码成乱码。
+//
+// 只能在非 Windows 上断言「拼回来等于原文」：Windows 的 decodeOutput 会按系统
+// ACP 解码，UTF-8 输入在这一层本来就不成立（中文 Windows 上是 936），切点边界
+// 由 TestSafeCutOnMultibyte 单独覆盖。
+func TestSplitLinesFlushKeepsMultibyteIntact(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("decodeOutput 按系统代码页解码，这里只验证 UTF-8 平台上的切点安全性")
+	}
+	var sb strings.Builder
+	for i := 0; i < 2000; i++ {
+		sb.WriteString("演员姓名甲乙丙")
+	}
+	in := sb.String()
+
+	var out strings.Builder
+	if err := splitLines(strings.NewReader(in), func(s string) { out.WriteString(s) }); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != in {
+		t.Fatal("拼接结果与原文不一致：切点切坏了多字节字符")
+	}
+	if strings.ContainsRune(out.String(), utf8.RuneError) {
+		t.Fatal("出现替换字符，说明切点落在多字节字符中间")
+	}
+}
+
+// safeCut 的契约：任意 limit 都不能切在多字节字符中间，且不能超过 limit。
+//
+// 两个平台的判据不同，验证方式也不同：UTF-8 看前缀是否合法，DBCS 用「分段解码
+// 再拼起来必须等于整段解码」来验——只有没劈坏字符时才成立。
+func TestSafeCutOnMultibyte(t *testing.T) {
+	var sample []byte
+	if runtime.GOOS == "windows" {
+		// 直接给 GBK 字节：中文 Windows 上是双字节字符（真正的考验），
+		// 其它代码页上这些都是单字节，随便怎么切都成立，同样不会误报。
+		sample = []byte("abc\xd6\xd0\xce\xc4 def\xd6\xd0")
+	} else {
+		sample = []byte("abc演员姓名甲乙丙 def演员")
+	}
+
+	whole, err := decodeOutput(sample)
+	if err != nil {
+		t.Fatalf("解码样本失败: %v", err)
+	}
+	for limit := 0; limit <= len(sample); limit++ {
+		cut := safeCut(sample, limit)
+		if cut < 0 || cut > limit {
+			t.Fatalf("limit=%d 切点越界: %d", limit, cut)
+		}
+		left, err1 := decodeOutput(sample[:cut])
+		right, err2 := decodeOutput(sample[cut:])
+		if err1 != nil || err2 != nil {
+			t.Fatalf("limit=%d 分段解码失败: %v %v", limit, err1, err2)
+		}
+		if left+right != whole {
+			t.Fatalf("limit=%d 切点 %d 劈开了字符：%q + %q != %q", limit, cut, left, right, whole)
+		}
+		if runtime.GOOS != "windows" && !utf8.Valid(sample[:cut]) {
+			t.Fatalf("limit=%d 切点 %d 把 UTF-8 前缀切坏了", limit, cut)
+		}
+	}
+
+	if runtime.GOOS != "windows" {
+		// 读取边界可能正好停在多字节字符中间：末尾那半个字必须留到下一次，
+		// 不能因为「已经在缓冲区末尾」就放行。
+		partial := []byte("abcd" + "演"[:2])
+		if cut := safeCut(partial, len(partial)); cut != len("abcd") {
+			t.Fatalf("末尾半字符应被留下：切点=%d，期望 4", cut)
+		}
+	}
+}
+
+// 进度帧之间没有分隔符，flush 切点若落在帧中间，会把同一帧的分片数与百分比
+// 劈到两段里：前一段出现「上一帧的百分比 + 这一帧的分片数」的张冠李戴，后一段
+// 又因为没有分片数而解析不出来，最后那帧 100% 就彻底丢了。体积同理，必须和
+// 百分比来自同一帧。这里让体积与分片数一一对应，穷举切点对齐方式逐段核对。
+//
+// 两种真实帧格式都要覆盖：带剩余时间的（Vid）和只以速度收尾的（Aud/Sub）。
+func TestSplitLinesFlushKeepsFinalProgress(t *testing.T) {
+	total := 47
+	formats := map[string]func(pad, pct, cur int) string{
+		"with-eta": func(pad, pct, cur int) string {
+			return fmt.Sprintf("Vid 1920x1080 | 6221 Kbps %s%s %d/%d %d.00%% %d.00MB/%d.00MB 3.60MBps 00:03:31",
+				strings.Repeat("━", 30), strings.Repeat(" ", pad), cur, total, pct, cur, total)
+		},
+		"no-eta": func(pad, pct, cur int) string {
+			return fmt.Sprintf("Aud Kbps -- %s%s %d/%d %d.00%% %d.00MB/%d.00MB %d.00KBps",
+				strings.Repeat("-", 30), strings.Repeat(" ", pad), cur, total, pct, cur, total, cur)
+		},
+	}
+	for name, mk := range formats {
+		t.Run(name, func(t *testing.T) {
+			for pad := 0; pad < 300; pad++ {
+				var sb strings.Builder
+				for i := 1; i < total; i++ {
+					sb.WriteString(mk(pad, i*100/total, i))
+				}
+				sb.WriteString(mk(pad, 100, total))
+
+				var last string
+				if err := splitLines(strings.NewReader(sb.String()), func(s string) {
+					// 每一段里，体积必须和分片数来自同一帧
+					if p, ok := ParseProgress(s); ok {
+						if want := fmt.Sprintf("%d.00MB", p.Current); p.Downloaded != want {
+							t.Fatalf("pad=%d 体积与百分比错配: 分片=%d 体积=%q 期望=%q 段尾=%q",
+								pad, p.Current, p.Downloaded, want, tailOf(s, 80))
+						}
+					}
+					last = s
+				}); err != nil {
+					t.Fatal(err)
+				}
+				p, ok := ParseProgress(last)
+				if !ok || p.Percent != 100 || p.Current != total || p.Total != total {
+					t.Fatalf("pad=%d 最后一帧被切坏了: 解析=%+v ok=%v 末段=%q", pad, p, ok, tailOf(last, 80))
+				}
+			}
+		})
+	}
+}
+
+func tailOf(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return "..." + s[len(s)-n:]
 }
