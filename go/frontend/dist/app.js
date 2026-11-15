@@ -179,7 +179,7 @@ function renderState(s) {
     const body = el("taskBody");
 
     if (items.length === 0) {
-        body.innerHTML = '<tr class="empty"><td colspan="6">没有可处理的任务，请选择 txt 并确认已启用站点</td></tr>';
+        body.innerHTML = '<tr class="empty"><td colspan="7">没有可处理的任务，请选择 txt 并确认已启用站点</td></tr>';
         setOverall(0);
         el("summaryText").textContent = "等待开始";
         el("summaryDetail").textContent = "";
@@ -206,12 +206,20 @@ function renderState(s) {
 
         const speed = it.speed ? `${it.speed}${it.eta ? " · " + it.eta : ""}` : "";
 
+        // 演员名在爬取完成后才有；取不到时留占位符，避免整列空白看不出区别。
+        const actors = Array.isArray(it.actors) ? it.actors.filter(Boolean) : [];
+        const actorText = actors.join("、");
+        const actorCell = actorText
+            ? `<span class="actor" title="${escapeHtml(actorText)}">${escapeHtml(actorText)}</span>`
+            : '<span class="hint">—</span>';
+
         return `<tr class="${st === "failed" ? "row-failed" : ""}">
             <td class="col-idx">${i + 1}</td>
             <td class="cell-name">
                 <div class="name">${escapeHtml(name || "—")}</div>
                 <div class="url">${escapeHtml(it.url || "")}</div>
             </td>
+            <td class="col-actor cell-actor">${actorCell}</td>
             <td class="col-site"><span class="tag">${escapeHtml(it.site || "-")}</span></td>
             <td class="col-status"><span class="tag ${st}">${STATUS_TEXT[st] || st}</span></td>
             <td class="col-progress">${progress}</td>

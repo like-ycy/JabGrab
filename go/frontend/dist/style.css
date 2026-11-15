@@ -391,6 +391,19 @@ body.resizing * {
     color: var(--muted);
 }
 
+.col-actor {
+    width: 132px;
+}
+
+/* 演员名可能是一串（合辑），限制宽度后省略，完整名单放 title 里看。 */
+.cell-actor .actor {
+    display: block;
+    max-width: 132px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .col-site {
     width: 74px;
 }

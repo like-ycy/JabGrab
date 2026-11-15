@@ -35,16 +35,19 @@ const (
 
 // Item 是列表里的一行。
 type Item struct {
-	URL        string  `json:"url"`
-	Site       string  `json:"site"`
-	Name       string  `json:"name"`
-	Status     Status  `json:"status"`
-	Message    string  `json:"message"`
-	Percent    float64 `json:"percent"`
-	Speed      string  `json:"speed"`
-	ETA        string  `json:"eta"`
-	Downloaded string  `json:"downloaded"`
-	TotalSize  string  `json:"totalSize"`
+	URL  string `json:"url"`
+	Site string `json:"site"`
+	// Actors 是爬取到的演员名，未爬取或页面无演员信息时为空。
+	// 前端按它渲染「演员」列，省得只能翻日志确认片子归属。
+	Actors     []string `json:"actors"`
+	Name       string   `json:"name"`
+	Status     Status   `json:"status"`
+	Message    string   `json:"message"`
+	Percent    float64  `json:"percent"`
+	Speed      string   `json:"speed"`
+	ETA        string   `json:"eta"`
+	Downloaded string   `json:"downloaded"`
+	TotalSize  string   `json:"totalSize"`
 }
 
 // State 是推给前端的完整快照。
@@ -223,6 +226,14 @@ func (r *Runner) process(
 			msg = "爬取失败"
 		}
 		return errors.New(msg)
+	}
+
+	// 演员名先落到任务项上：即使后面因为取不到视频名而失败，
+	// 列表里也能看出这条是谁的作品，不用回头翻日志。
+	if len(res.Actors) > 0 {
+		r.patch(idx, func(it *Item) {
+			it.Actors = append([]string(nil), res.Actors...)
+		})
 	}
 
 	name := downloader.SafeName(res.VideoName)
@@ -617,6 +628,13 @@ func cloneState(s State) State {
 	cp := s
 	cp.Items = make([]Item, len(s.Items))
 	copy(cp.Items, s.Items)
+	// Actors 是切片，浅拷贝会与运行中的状态共用底层数组：
+	// 单独复制一份，让快照真正不可变。
+	for i := range cp.Items {
+		if len(cp.Items[i].Actors) > 0 {
+			cp.Items[i].Actors = append([]string(nil), cp.Items[i].Actors...)
+		}
+	}
 	return cp
 }
 

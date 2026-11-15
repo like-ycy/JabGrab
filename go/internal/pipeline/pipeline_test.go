@@ -345,6 +345,20 @@ func TestFindExistingVersion(t *testing.T) {
 	}
 }
 
+// 快照必须与运行中的状态隔离：演员名是切片，浅拷贝会让前端拿到的
+// 快照被后续修改带跑。
+func TestSnapshotCopiesActors(t *testing.T) {
+	r := New(config.Default(), Hooks{})
+	r.state = State{Items: []Item{{Actors: []string{"演员甲"}}}}
+
+	st := r.Snapshot()
+	st.Items[0].Actors[0] = "改过"
+
+	if got := r.Snapshot().Items[0].Actors[0]; got != "演员甲" {
+		t.Fatalf("快照改动不应回写内部状态 got=%q", got)
+	}
+}
+
 func TestRunnerSnapshotInitial(t *testing.T) {
 	r := New(config.Default(), Hooks{})
 	st := r.Snapshot()
