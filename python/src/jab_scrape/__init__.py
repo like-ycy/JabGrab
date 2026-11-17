@@ -22,7 +22,25 @@ for _stream in (_sys.stdout, _sys.stderr):
         pass
 del _stream
 
-from .models import ScrapeResult
-from .scraper import BaseScraper
+from ._version import __version__
 
-__all__ = ["BaseScraper", "ScrapeResult"]
+__all__ = ["BaseScraper", "ScrapeResult", "__version__"]
+
+
+def __getattr__(name: str):
+    """按需导入重导出的名字。
+
+    `jab_scrape.scraper` 一 import 就会拉起 seleniumbase（几秒）。若在这里直接
+    `from .scraper import BaseScraper`，那么 `jab-scrape --version` 也要先付这
+    几秒 —— 而它存在的意义恰恰是在「装坏了」的现场取版本号，那时 seleniumbase
+    可能根本 import 不进来。
+    """
+    if name == "BaseScraper":
+        from .scraper import BaseScraper
+
+        return BaseScraper
+    if name == "ScrapeResult":
+        from .models import ScrapeResult
+
+        return ScrapeResult
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

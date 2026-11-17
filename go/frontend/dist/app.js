@@ -16,6 +16,10 @@ const STATUS_TEXT = {
 const el = (id) => document.getElementById(id);
 
 let draft = null; // 设置页正在编辑的配置副本
+// 外部组件的最近一次状态。它同时被设置页的卡片与任务页的提示条使用，
+// 所以放在模块级：两个视图渲染同源数据，不会出现「设置页说没装、任务页说装好了」。
+let components = [];
+let componentsDir = "";
 let lastState = { running: false, index: 0, total: 0, items: [] };
 let logCount = 0;
 let followLog = true;
@@ -39,6 +43,8 @@ async function boot() {
     try {
         const info = await api().Boot();
         draft = normalize(info.config);
+        componentsDir = info.componentsDir || "";
+        setComponents(info.components || [], info);
         renderEnv(info);
         renderSettings(draft);
         renderState(info.state || lastState);
@@ -54,6 +60,26 @@ async function boot() {
 
     window.runtime.EventsOn("pipeline:state", (s) => renderState(s));
     window.runtime.EventsOn("pipeline:log", (l) => appendLog(l));
+
+    // 组件事件：进度按 100ms 限流后推来，done/failed 是终态。
+    // 刷新（refreshed）只表示「清单拉回来了」，用 ListComponents 重取一次最稳。
+    window.runtime.EventsOn("component:progress", (p) => {
+        const c = components.find((x) => x.name === p.name);
+        if (!c) return;
+        c.installing = true;
+        c.progressDone = p.done;
+        c.progressTotal = p.total;
+        renderComponents();
+    });
+    window.runtime.EventsOn("component:done", (p) => {
+        appendLog({ level: "info", text: `组件 ${p.name} ${p.version} 已安装` });
+        refreshComponents();
+    });
+    window.runtime.EventsOn("component:failed", (p) => {
+        appendLog({ level: "error", text: `组件 ${p.name} 安装失败：${p.message}` });
+        refreshComponents();
+    });
+    window.runtime.EventsOn("component:refreshed", () => refreshComponents());
 }
 
 function normalize(cfg) {
@@ -63,6 +89,9 @@ function normalize(cfg) {
     c.recentTxt = c.recentTxt || [];
     c.dlrPath = c.dlrPath || "";
     c.pythonCmd = c.pythonCmd || "";
+    c.ffmpegPath = c.ffmpegPath || "";
+    c.componentMirror = c.componentMirror || "";
+    c.componentsOnDemand = c.componentsOnDemand !== false;
     c.sites = c.sites || {};
     c.download = c.download || {};
     c.scrapeTimeoutSec = c.scrapeTimeoutSec || 180;
@@ -165,8 +194,15 @@ function renderEnv(info) {
 
     el("scrapeHint").textContent = info.scrapeErr
         ? info.scrapeErr
-        : "实际执行：" + (info.scrapeCmd || []).join(" ");
+        : `实际执行：${(info.scrapeCmd || []).join(" ")}（${info.scrapeSource || "未知来源"}）`;
     el("scrapeHint").className = "hint" + (info.scrapeErr ? " bad" : "");
+
+    if (el("ffmpegHint")) {
+        el("ffmpegHint").textContent = info.ffmpegPath
+            ? `${info.ffmpegSource}：${info.ffmpegPath}`
+            : "未找到 ffmpeg —— 下载器启动时会拒绝运行";
+        el("ffmpegHint").className = "hint" + (info.ffmpegPath ? "" : " bad");
+    }
 }
 
 /* ---------- 任务状态渲染 ---------- */
@@ -304,6 +340,171 @@ function appendLog(line) {
     }
 }
 
+/* ---------- 外部组件 ---------- */
+
+// 组件状态 → 徽标文案与配色。key 与后端 component.State.String() 一一对应。
+const COMPONENT_STATE = {
+    ready: { text: "已就绪", cls: "done" },
+    missing: { text: "未安装", cls: "failed" },
+    outdated: { text: "可更新", cls: "scraping" },
+    corrupt: { text: "文件不完整", cls: "failed" },
+    incompatible: { text: "与程序不兼容", cls: "failed" },
+};
+
+function setComponents(list, info) {
+    components = Array.isArray(list) ? list : [];
+    if (info && info.componentsDir) componentsDir = info.componentsDir;
+    renderComponents();
+}
+
+async function refreshComponents() {
+    if (!api()) return;
+    try {
+        setComponents(await api().ListComponents());
+    } catch (err) {
+        appendLog({ level: "warn", text: "刷新组件状态失败: " + err });
+    }
+}
+
+function humanSize(bytes) {
+    const n = Number(bytes || 0);
+    if (n <= 0) return "";
+    const mb = n / (1024 * 1024);
+    return mb >= 1024 ? (mb / 1024).toFixed(1) + " GB" : mb.toFixed(1) + " MB";
+}
+
+function componentCard(c) {
+    // 「装没装组件」与「能不能用」是两件事：整包用户、手动指定的用户都没装组件，
+    // 但刮削/下载照常工作。卡片上把它们混成一句「未安装」会让人以为必须点下载。
+    const usable = !!c.path;
+    let st = COMPONENT_STATE[c.state] || { text: c.state || "未知", cls: "cancelled" };
+    if (!usable && c.state === "missing") {
+        st = { text: "缺失", cls: "failed" };
+    } else if (usable && (c.state === "missing" || c.state === "outdated")) {
+        st = { text: c.source ? c.source + "可用" : "可用", cls: "done" };
+    }
+    const parts = [];
+    if (c.installedVersion) parts.push("已装 " + c.installedVersion);
+    if (c.availableVersion && c.availableVersion !== c.installedVersion) {
+        parts.push("可装 " + c.availableVersion);
+    }
+    if (c.size) parts.push(humanSize(c.size));
+    const meta = parts.join(" · ") || "暂无版本信息";
+
+    // 生效路径 + 来源：这是排查「装了却不生效」的唯一线索，必须显示。
+    const origin = c.path
+        ? `<div class="comp-path" title="${escapeHtml(c.path)}">${escapeHtml(c.source || "")}：${escapeHtml(c.path)}</div>`
+        : "";
+
+    let action = "";
+    if (c.installing) {
+        const pct = c.progressTotal ? Math.min(100, (c.progressDone / c.progressTotal) * 100) : 0;
+        action = `<div class="bar small"><i style="width:${pct.toFixed(1)}%"></i></div>
+                  <div class="comp-meta">下载中 ${humanSize(c.progressDone)}${
+                      c.progressTotal ? " / " + humanSize(c.progressTotal) : ""
+                  }</div>`;
+    } else {
+        const buttons = [];
+        if (c.canInstall && c.onDemand && c.state !== "ready") {
+            const label = c.state === "outdated" ? "更新" : "下载安装";
+            buttons.push(`<button data-install="${escapeHtml(c.name)}">${label}${c.size ? "（" + humanSize(c.size) + "）" : ""}</button>`);
+        }
+        if (c.installedVersion) {
+            buttons.push(`<button class="ghost" data-remove="${escapeHtml(c.name)}">移除</button>`);
+        }
+        // 有可用可执行文件时不再报「无法确定下载信息」：对这类用户，装组件只是
+        // 「换一份更新的副本」，不是能用与否的问题。
+        if (buttons.length === 0 && c.message && !usable) {
+            buttons.push(`<span class="hint bad">${escapeHtml(c.message)}</span>`);
+        }
+        action = `<div class="comp-actions">${buttons.join("")}</div>`;
+    }
+
+    return `<div class="comp">
+        <div class="comp-head">
+            <strong>${escapeHtml(c.label || c.name)}</strong>
+            <span class="tag ${st.cls}">${st.text}</span>
+        </div>
+        <div class="comp-meta">${escapeHtml(meta)}</div>
+        ${origin}
+        ${action}
+    </div>`;
+}
+
+function renderComponents() {
+    const box = el("componentList");
+    if (box) {
+        if (components.length === 0) {
+            box.innerHTML = '<p class="hint">未读到组件信息（组件目录不可用，或本构建没有清单）</p>';
+        } else {
+            box.innerHTML = components.map(componentCard).join("");
+            box.querySelectorAll("[data-install]").forEach((btn) => {
+                btn.addEventListener("click", () => installComponent(btn.dataset.install));
+            });
+            box.querySelectorAll("[data-remove]").forEach((btn) => {
+                btn.addEventListener("click", () => removeComponent(btn.dataset.remove));
+            });
+        }
+    }
+    if (el("componentsDir")) {
+        el("componentsDir").textContent = componentsDir ? "安装目录：" + componentsDir : "";
+    }
+    renderComponentBanner();
+}
+
+// 任务页顶部的缺口提示：只在「真的缺、且用户没关掉入口」时出现。
+function renderComponentBanner() {
+    const banner = el("componentBanner");
+    if (!banner) return;
+    const missing = components.filter(
+        (c) => !c.optional && !c.installing && !c.path && ["missing", "corrupt", "incompatible"].includes(c.state)
+    );
+    const onDemand = components.length === 0 ? true : components[0].onDemand !== false;
+    if (missing.length === 0 || !onDemand) {
+        banner.classList.add("hidden");
+        return;
+    }
+    const names = missing.map((c) => c.label || c.name).join("、");
+    const total = missing.reduce((sum, c) => sum + (c.size || 0), 0);
+    // 拿不到清单时（断网且没有内置清单）体积未知，此时宁可不写，也别编一个数。
+    const sizeText = total ? `（约 ${humanSize(total)}）` : "";
+    el("componentBannerText").textContent = `还差一步：缺少${names}${sizeText}，装好才能开始。`;
+    banner.classList.remove("hidden");
+}
+
+async function installComponent(name) {
+    if (!api()) return;
+    try {
+        await api().InstallComponent(name);
+        const c = components.find((x) => x.name === name);
+        if (c) {
+            c.installing = true;
+            c.progressDone = 0;
+            c.progressTotal = c.size || 0;
+            renderComponents();
+        }
+    } catch (err) {
+        appendLog({ level: "error", text: "启动下载失败: " + err });
+    }
+}
+
+async function removeComponent(name) {
+    if (!api()) return;
+    try {
+        await api().RemoveComponent(name);
+    } catch (err) {
+        appendLog({ level: "error", text: "移除失败: " + err });
+    }
+    await refreshComponents();
+}
+
+function gotoComponents() {
+    const tab = document.querySelector('.tab[data-view="settings"]');
+    if (tab) tab.click();
+    const box = el("componentList");
+    if (box) box.scrollIntoView({ block: "center" });
+}
+
 /* ---------- 设置页 ---------- */
 
 function renderSettings(cfg) {
@@ -311,6 +512,9 @@ function renderSettings(cfg) {
     el("txtPathInput").value = cfg.txtPath;
     el("dlrPath").value = cfg.dlrPath;
     el("pythonCmd").value = cfg.pythonCmd;
+    if (el("ffmpegPath")) el("ffmpegPath").value = cfg.ffmpegPath;
+    if (el("componentMirror")) el("componentMirror").value = cfg.componentMirror;
+    if (el("componentsOnDemand")) el("componentsOnDemand").checked = cfg.componentsOnDemand !== false;
 
     el("threads").value = cfg.download.threads ?? 25;
     el("retryCount").value = cfg.download.retryCount ?? 20;
@@ -321,6 +525,7 @@ function renderSettings(cfg) {
 
     renderSites(cfg.sites);
     renderRecent(cfg.recentTxt);
+    renderComponents();
 }
 
 function renderSites(sites) {
@@ -372,6 +577,9 @@ function collectConfig() {
     cfg.txtPath = el("txtPathInput").value.trim();
     cfg.dlrPath = el("dlrPath").value.trim();
     cfg.pythonCmd = el("pythonCmd").value.trim();
+    if (el("ffmpegPath")) cfg.ffmpegPath = el("ffmpegPath").value.trim();
+    if (el("componentMirror")) cfg.componentMirror = el("componentMirror").value.trim();
+    if (el("componentsOnDemand")) cfg.componentsOnDemand = el("componentsOnDemand").checked;
     cfg.scrapeTimeoutSec = intVal("scrapeTimeoutSec", 180);
     cfg.download = {
         threads: intVal("threads", 25),
@@ -449,6 +657,10 @@ function bindButtons() {
             if (kind === "dlr") el("dlrPath").value = p;
         });
     });
+
+    if (el("btnGoComponents")) {
+        el("btnGoComponents").addEventListener("click", () => gotoComponents());
+    }
 
     el("btnSave").addEventListener("click", () => saveSettings(false));
 }

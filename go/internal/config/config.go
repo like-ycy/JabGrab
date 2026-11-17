@@ -39,11 +39,21 @@ type Download struct {
 // Config 是应用的全部可配置项。
 type Config struct {
 	// 路径
-	SaveDir   string   `json:"saveDir"`   // 视频保存目录
-	TxtPath   string   `json:"txtPath"`   // 待下载 URL 列表
-	RecentTxt []string `json:"recentTxt"` // 最近用过的 txt
-	DlrPath   string   `json:"dlrPath"`   // N_m3u8DL-RE 路径，空则用同级目录/PATH
-	PythonCmd string   `json:"pythonCmd"` // 爬取命令，空则自动探测
+	SaveDir    string   `json:"saveDir"`    // 视频保存目录
+	TxtPath    string   `json:"txtPath"`    // 待下载 URL 列表
+	RecentTxt  []string `json:"recentTxt"`  // 最近用过的 txt
+	DlrPath    string   `json:"dlrPath"`    // N_m3u8DL-RE 路径，空则用同级目录/PATH
+	PythonCmd  string   `json:"pythonCmd"`  // 爬取命令，空则自动探测
+	FFmpegPath string   `json:"ffmpegPath"` // ffmpeg 路径，空则组件/同级目录/PATH
+
+	// 组件（按需下载的外部程序：scraper / dlre）
+	//
+	// 用 *bool 而不是 bool：零值是 false，而「用户没设置过」与「用户关掉了」
+	// 对默认值的要求正好相反 —— 前者要按默认（开），后者要尊重用户。普通 bool
+	// 在读旧配置（没有这个键）时会被当成「关掉了」，升级后的用户突然没有了下载
+	// 入口，而他并没有改过任何设置。
+	ComponentsOnDemand *bool  `json:"componentsOnDemand,omitempty"`
+	ComponentMirror    string `json:"componentMirror"` // 组件下载源前缀，空则直连 GitHub
 
 	// 站点
 	Sites map[string]Site `json:"sites"`
@@ -53,6 +63,20 @@ type Config struct {
 
 	// 爬取超时（秒）。开浏览器比下载慢，单独设。
 	ScrapeTimeoutSec int `json:"scrapeTimeoutSec"`
+}
+
+// boolPtr 返回 v 的地址，用于构造带默认值的可选开关。
+func boolPtr(v bool) *bool { return &v }
+
+// ComponentsOnDemandEnabled 报告是否显示「下载组件」入口。
+//
+// 语义收窄为「是否显示入口」：已装的组件永远生效，关掉开关不会让 scraper
+// 突然找不到 —— 否则用户点一下开关就以为组件丢了。
+func (c Config) ComponentsOnDemandEnabled() bool {
+	if c.ComponentsOnDemand == nil {
+		return true
+	}
+	return *c.ComponentsOnDemand
 }
 
 // Default 返回一份可用的默认配置。
@@ -72,7 +96,8 @@ func Default() Config {
 			MaxSpeed:   "",
 			MuxToMP4:   true,
 		},
-		ScrapeTimeoutSec: 180,
+		ScrapeTimeoutSec:   180,
+		ComponentsOnDemand: boolPtr(true),
 	}
 }
 
@@ -193,6 +218,10 @@ func (c *Config) normalize() {
 	if c.RecentTxt == nil {
 		c.RecentTxt = []string{}
 	}
+	// nil 表示「配置里没有这个键」→ 用默认值（开）。显式的 false 会保留。
+	if c.ComponentsOnDemand == nil {
+		c.ComponentsOnDemand = def.ComponentsOnDemand
+	}
 }
 
 // SiteNames 返回全部站点名，按字典序保证 UI 顺序稳定。
@@ -264,6 +293,12 @@ func (c Config) Check() []string {
 	if strings.TrimSpace(c.DlrPath) != "" {
 		if err := executableOK(c.DlrPath); err != nil {
 			issues = append(issues, fmt.Sprintf("N_m3u8DL-RE 不可用: %v", err))
+		}
+	}
+
+	if strings.TrimSpace(c.FFmpegPath) != "" {
+		if err := executableOK(c.FFmpegPath); err != nil {
+			issues = append(issues, fmt.Sprintf("ffmpeg 路径不可用: %v", err))
 		}
 	}
 

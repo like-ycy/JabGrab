@@ -700,3 +700,63 @@ input[type="number"]:focus {
     background: #c2c8d6;
     background-clip: content-box;
 }
+
+/* ---------- 外部组件 ---------- */
+.component-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 12px;
+}
+
+.comp {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 12px;
+    background: #fcfdff;
+}
+
+.comp-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.comp-meta {
+    color: var(--muted);
+    font-size: 11px;
+    margin-top: 3px;
+}
+
+/* 生效路径可能很长（Windows 上尤甚），单行省略，靠 title 看全 */
+.comp-path {
+    color: var(--muted);
+    font-size: 11px;
+    margin-top: 3px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.comp-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 9px;
+}
+
+.comp .bar {
+    margin-top: 8px;
+}
+
+/* 提示条里的文字按钮 */
+button.link {
+    background: none;
+    border: none;
+    padding: 0;
+    margin-left: 8px;
+    color: var(--accent);
+    font-size: 12px;
+    text-decoration: underline;
+    cursor: pointer;
+}

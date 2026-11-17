@@ -62,6 +62,9 @@ type State struct {
 type Hooks struct {
 	OnState func(State)
 	OnLog   func(level, text string)
+	// Resolve 把「组件名 → 已安装组件的候选路径」注入定位链。
+	// 为 nil 时定位只看随包与旧布局，等价于「没装过按需组件」。
+	Resolve locate.Resolver
 }
 
 // Runner 持有一次运行的上下文。
@@ -151,22 +154,27 @@ func (r *Runner) Run(ctx context.Context) error {
 		return nil
 	}
 
-	dlrPath, dlrSource, dlrErr := locate.Dlr(cfg)
+	dlrPath, dlrSource, dlrErr := locate.Dlr(cfg, locate.From(r.hooks.Resolve, locate.NameDlr)...)
 	if dlrErr != nil {
 		return dlrErr
 	}
 	// ffmpeg 是 dl-re 的启动期硬依赖：缺了它连下载都不开始（不是只影响混流）。
-	// 除了 PATH，也要认下载器同目录（便携部署的常见摆法），否则会误拒可用环境。
-	if downloader.FindFFmpeg(filepath.Dir(dlrPath)) == "" {
+	// 定位链里既认组件/随包，也认 PATH 与下载器同目录（便携部署的常见摆法），
+	// 否则会误拒一个其实可用的环境。
+	ffmpegPath, ffmpegSource := locate.FFmpeg(cfg, []string{filepath.Dir(dlrPath)},
+		locate.From(r.hooks.Resolve, locate.NameFFmpeg)...)
+	if ffmpegPath == "" {
 		return errors.New("未找到 ffmpeg：N_m3u8DL-RE 启动时必须校验 ffmpeg，" +
 			"请安装后重试，或把 ffmpeg 放到下载器同目录")
 	}
-	scrapeArgv, scrapeDir, scrapeErr := locate.Scrape(cfg)
+	scrapeArgv, scrapeDir, scrapeSource, scrapeErr := locate.ScrapeSource(cfg,
+		locate.From(r.hooks.Resolve, locate.NameScraper)...)
 	if scrapeErr != nil {
 		return scrapeErr
 	}
 	r.logf("info", fmt.Sprintf("下载器: %s（%s）", dlrPath, dlrSource))
-	r.logf("info", fmt.Sprintf("爬取命令: %s", strings.Join(scrapeArgv, " ")))
+	r.logf("info", fmt.Sprintf("爬取命令: %s（%s）", strings.Join(scrapeArgv, " "), scrapeSource))
+	r.logf("info", fmt.Sprintf("ffmpeg: %s（%s）", ffmpegPath, ffmpegSource))
 
 	scr := scraper.Scraper{
 		Argv:    scrapeArgv,
@@ -182,7 +190,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 		r.updateIndex(i + 1)
 
-		if err := r.process(runCtx, cfg, dlrPath, scr, i); err != nil {
+		if err := r.process(runCtx, cfg, dlrPath, ffmpegPath, scr, i); err != nil {
 			if errors.Is(err, context.Canceled) {
 				r.patch(i, func(it *Item) {
 					it.Status = StatusCancelled
@@ -205,7 +213,7 @@ func (r *Runner) Run(ctx context.Context) error {
 
 // process 处理单条：爬取 → 跳过判断 → 下载。
 func (r *Runner) process(
-	ctx context.Context, cfg config.Config, dlrPath string, scr scraper.Scraper, idx int,
+	ctx context.Context, cfg config.Config, dlrPath, ffmpegPath string, scr scraper.Scraper, idx int,
 ) error {
 	item := r.item(idx)
 	total := r.total()
@@ -279,7 +287,7 @@ func (r *Runner) process(
 		TimeoutSec: cfg.Download.TimeoutSec,
 		MaxSpeed:   cfg.Download.MaxSpeed,
 		MuxToMP4:   cfg.Download.MuxToMP4,
-		FFmpegPath: downloader.FindFFmpeg(filepath.Dir(dlrPath)),
+		FFmpegPath: ffmpegPath,
 		Headers:    res.Headers,
 	}
 

@@ -26,6 +26,10 @@
     <main>
         <!-- 任务页 -->
         <section class="view active" id="view-tasks">
+            <div class="banner hidden" id="componentBanner">
+                <span id="componentBannerText"></span>
+                <button class="link" id="btnGoComponents">去设置下载</button>
+            </div>
             <div class="card">
                 <div class="toolbar">
                     <div class="path-box">
@@ -111,12 +115,46 @@
                     <div class="hint" id="dlrHint"></div>
                 </div>
                 <div class="field">
+                    <label>ffmpeg 路径</label>
+                    <div class="input-row">
+                        <input id="ffmpegPath" type="text" placeholder="留空则用组件、PATH 或下载器同目录" />
+                    </div>
+                    <div class="hint" id="ffmpegHint"></div>
+                </div>
+                <div class="field">
                     <label>爬取命令</label>
                     <div class="input-row">
                         <input id="pythonCmd" type="text" placeholder="留空则自动探测（同级 jab-scrape 或 uv run）" />
                     </div>
                     <div class="hint" id="scrapeHint"></div>
                 </div>
+            </div>
+
+            <div class="card">
+                <h2>外部组件</h2>
+                <p class="hint">
+                    爬取程序与下载器可以独立下载与更新：升级本程序时不必重下这几十 MB，
+                    换一个爬取规则也不必重发 App。
+                </p>
+                <div id="componentList" class="component-list"></div>
+                <div class="field">
+                    <label>组件下载源（可选）</label>
+                    <div class="input-row">
+                        <input id="componentMirror" type="text"
+                               placeholder="留空直连 GitHub；可填镜像前缀，如 https://ghproxy.example/" />
+                    </div>
+                    <div class="hint">
+                        填了前缀之后，清单请求与包下载都会走它。必须是 https（本机回环除外）——
+                        否则清单里的校验码和包可以被同一个人同时替换，「校验通过」就不再说明任何事。
+                    </div>
+                </div>
+                <div class="field checkbox-field">
+                    <label>
+                        <input id="componentsOnDemand" type="checkbox" />
+                        缺少组件时提示下载（关掉只是不显示入口，已装的组件仍然生效）
+                    </label>
+                </div>
+                <div class="hint" id="componentsDir"></div>
             </div>
 
             <div class="card">

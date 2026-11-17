@@ -13,7 +13,6 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"jabgrab/internal/config"
-	"jabgrab/internal/downloader"
 	"jabgrab/internal/locate"
 	"jabgrab/internal/pipeline"
 	"jabgrab/internal/proc"
@@ -27,15 +26,23 @@ type LogLine struct {
 
 // BootInfo 是前端启动时拿到的全部环境信息。
 type BootInfo struct {
-	Config     config.Config  `json:"config"`
-	ConfigPath string         `json:"configPath"`
-	Issues     []string       `json:"issues"`
-	DlrPath    string         `json:"dlrPath"`
-	DlrSource  string         `json:"dlrSource"`
-	DlrVersion string         `json:"dlrVersion"`
-	ScrapeCmd  []string       `json:"scrapeCmd"`
-	ScrapeErr  string         `json:"scrapeErr"`
-	State      pipeline.State `json:"state"`
+	Config     config.Config `json:"config"`
+	ConfigPath string        `json:"configPath"`
+	Issues     []string      `json:"issues"`
+	DlrPath    string        `json:"dlrPath"`
+	DlrSource  string        `json:"dlrSource"`
+	DlrVersion string        `json:"dlrVersion"`
+	ScrapeCmd  []string      `json:"scrapeCmd"`
+	ScrapeSrc  string        `json:"scrapeSource"`
+	ScrapeErr  string        `json:"scrapeErr"`
+	FFmpegPath string        `json:"ffmpegPath"`
+	FFmpegSrc  string        `json:"ffmpegSource"`
+	// Components 是各外部组件的状态，与 ListComponents 同源；放一份在这里是
+	// 为了让首屏一次请求就能画出设置页，不必再等一次往返。
+	Components []ComponentDTO `json:"components"`
+	// ComponentsDir 是已安装组件的落盘目录，出问题时用户要能直接找到它。
+	ComponentsDir string         `json:"componentsDir"`
+	State         pipeline.State `json:"state"`
 }
 
 // App 是绑定给前端的后端对象。
@@ -47,6 +54,14 @@ type App struct {
 	runner    *pipeline.Runner
 	dlrVer    string
 	dlrVerFor string
+
+	// components 管理按需下载的外部组件（清单缓存、安装、卸载）。
+	components *componentService
+	// installMu 只保护下面两个 map，与 a.mu 分开：安装进度每 100ms 更新一次，
+	// 混进 a.mu 会让「刷新状态」与「下载进度」互相阻塞。
+	installMu       sync.Mutex
+	installs        map[string]bool
+	installProgress map[string][2]int64
 }
 
 func NewApp() *App {
@@ -70,6 +85,9 @@ func (a *App) startup(ctx context.Context) {
 		cfg = saved
 	}
 
+	a.components = newComponentService()
+	a.cleanupComponents()
+
 	a.mu.Lock()
 	a.cfg = cfg
 	a.runner = pipeline.New(cfg, pipeline.Hooks{
@@ -79,8 +97,18 @@ func (a *App) startup(ctx context.Context) {
 		OnLog: func(level, text string) {
 			runtime.EventsEmit(ctx, "pipeline:log", LogLine{Level: level, Text: text})
 		},
+		Resolve: a.resolveComponent,
 	})
 	a.mu.Unlock()
+}
+
+// emit 把一个事件推给前端。上下文未就绪时静默丢弃：组件安装是异步的，
+// 窗口可能在下载途中就被关掉。
+func (a *App) emit(event string, payload any) {
+	if a.ctx == nil {
+		return
+	}
+	runtime.EventsEmit(a.ctx, event, payload)
 }
 
 func (a *App) shutdown(ctx context.Context) {
@@ -105,19 +133,31 @@ func (a *App) Boot() BootInfo {
 	}
 	info.Issues = cfg.Check()
 
-	if p, src, err := locate.Dlr(cfg); err == nil {
+	if p, src, err := locate.Dlr(cfg, a.candidates(locate.NameDlr)...); err == nil {
 		info.DlrPath, info.DlrSource = p, src
 		info.DlrVersion = a.dlrVersion(p)
 	} else {
 		info.Issues = append(info.Issues, err.Error())
 	}
 
-	if argv, _, err := locate.Scrape(cfg); err == nil {
-		info.ScrapeCmd = argv
+	if argv, _, src, err := locate.ScrapeSource(cfg, a.candidates(locate.NameScraper)...); err == nil {
+		info.ScrapeCmd, info.ScrapeSrc = argv, src
 	} else {
 		info.ScrapeErr = err.Error()
 		info.Issues = append(info.Issues, err.Error())
 	}
+
+	// ffmpeg 的「附近目录」取下载器所在目录：便携部署常把两者放在一起。
+	var near []string
+	if info.DlrPath != "" {
+		near = append(near, filepath.Dir(info.DlrPath))
+	}
+	info.FFmpegPath, info.FFmpegSrc = locate.FFmpeg(cfg, near, a.candidates(locate.NameFFmpeg)...)
+
+	if a.components.available() {
+		info.ComponentsDir = a.components.rootDir()
+	}
+	info.Components = a.ListComponents()
 
 	if runner != nil {
 		info.State = runner.Snapshot()
@@ -202,9 +242,9 @@ func (a *App) Start() error {
 		return fmt.Errorf("配置有问题: %s", strings.Join(issues, "；"))
 	}
 	// 提前拦住：ffmpeg 缺失时 dl-re 启动即崩，等用户点开始后再逐条失败体验很差。
-	// 查下载器同目录，兼容「ffmpeg 与 dl-re 放一起」的便携部署。
-	if dlr, _, err := locate.Dlr(cfg); err == nil {
-		if downloader.FindFFmpeg(filepath.Dir(dlr)) == "" {
+	// 定位链会查组件、随包、PATH 与「下载器同目录」（便携部署的常见摆法）。
+	if dlr, _, err := locate.Dlr(cfg, a.candidates(locate.NameDlr)...); err == nil {
+		if p, _ := locate.FFmpeg(cfg, []string{filepath.Dir(dlr)}, a.candidates(locate.NameFFmpeg)...); p == "" {
 			return errors.New("未找到 ffmpeg：N_m3u8DL-RE 启动时必须校验 ffmpeg，" +
 				"请先安装（macOS 可 brew install ffmpeg；Windows 把 ffmpeg.exe 所在目录加入 PATH，" +
 				"或把 ffmpeg 放到下载器同目录）")

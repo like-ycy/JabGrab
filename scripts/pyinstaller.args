@@ -6,10 +6,23 @@
 --noconfirm
 --clean
 --onedir
+# 去掉 docstring 与 assert，主程序 12MB → 约 10.5MB。
+# 已核实 seleniumbase 4.57 源码里没有 `assert` 语句，core/ 与 fixtures/ 也不读
+# __doc__，所以对它是安全的；线上若出现异常行为，删掉这两行就是第一个该回退的。
+--optimize
+2
 --name
 jab-scrape
 --paths
 src
+# 站点解析器是惰性导入的（见 __main__.py 的 SOURCE_MODULES）：为了 --version 能
+# 在 seleniumbase 装坏时也给出答案，顶层不再静态 import jable/missav。代价是
+# PyInstaller 的静态分析看不到这两个模块，必须显式声明 —— 否则产物里没有它们，
+# 而 --help 与 --version 一切正常，真正爬取时才 ModuleNotFoundError。
+--hidden-import
+jab_scrape.jable
+--hidden-import
+jab_scrape.missav
 --collect-all
 seleniumbase
 --collect-all
