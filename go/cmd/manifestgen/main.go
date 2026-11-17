@@ -713,9 +713,12 @@ func packComponent(opts packOptions) error {
 
 // writeComponentZip 把 src 目录打成一个「顶层带组件名」的 zip。
 //
-// 符号链接直接报错而不同步复制：复制会把链接换成实体文件，装出来的目录与构建
-// 目录不同，而这种差异只在某个动态库被重复加载时才发作。当前产物没有链接
-// （PyInstaller onedir 是普通文件树），真出现了应该显式处理，而不是悄悄改形状。
+// 符号链接按链接本身写入（zip 的 symlink 条目），不是解引用成实体文件：
+// PyInstaller 在 macOS 上会产出 `_internal/Python -> Python.framework/...`
+// 这类链接，解引用会让同一份 libpython 在包里出现两次 —— 体积涨几 MB，而
+// 装出来的目录结构与构建目录不一致，将来排查「本地能跑、装完不能跑」时
+// 第一个要排除的就是这种差异。解压侧（internal/component 的 extract）会
+// 校验链接目标不越界后再重建链接，所以这里只负责把目标字符串原样带上。
 func writeComponentZip(src, zipPath, name string) error {
 	file, err := os.Create(zipPath)
 	if err != nil {
@@ -738,10 +741,24 @@ func writeComponentZip(src, zipPath, name string) error {
 		if err != nil {
 			return err
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("%s 是符号链接，组件包暂不支持（见 writeComponentZip 注释）", rel)
-		}
 		entryName := name + "/" + filepath.ToSlash(rel)
+		if info.Mode()&os.ModeSymlink != 0 {
+			// 链接条目：内容就是目标路径，模式位保留 ModeSymlink。
+			// WinRAR/7-Zip 之类工具会把它显示成链接；Go 的解压侧靠 SetMode
+			// 写下的外部属性还原，不依赖任何平台特有的额外字段。
+			target, err := os.Readlink(path)
+			if err != nil {
+				return fmt.Errorf("读取符号链接 %s: %w", rel, err)
+			}
+			header := &zip.FileHeader{Name: entryName, Method: zip.Deflate}
+			header.SetMode(os.ModeSymlink | 0o777)
+			writer, err := zw.CreateHeader(header)
+			if err != nil {
+				return err
+			}
+			_, err = io.WriteString(writer, target)
+			return err
+		}
 		if entry.IsDir() {
 			// 显式写目录条目：解压侧的 TopLevelDir 认「以 name/ 开头」的条目，
 			// 而 zip 里只有文件条目也能过 —— 但空目录会丢。多写一条更接近

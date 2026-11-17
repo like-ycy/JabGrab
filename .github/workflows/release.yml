@@ -83,6 +83,9 @@ jobs:
           rm -rf out && mkdir -p out/scraper out/dlre
           cp -R python/build/pyi/dist/jab-scrape/. out/scraper/
           cp go/third_party/N_m3u8DL-RE out/dlre/
+          # 缩略列出链接：PyInstaller 在 macOS 上会产出 _internal/Python 之类的链接，
+          # 组件包里它们按链接保存。真出问题时，这一行是唯一能直接看到目标的地方。
+          find out -type l -exec ls -l {} \; || true
           cd go
           # -pack 一个命令完成三件事：跑产物取版本 → 生成自述 → 按自述版本命名打包。
           # 包名与自述版本由同一份代码保证一致；用 shell 拼的话，两者分叉的表现是
@@ -164,7 +167,21 @@ jobs:
           done
 
           # 从最终位置真跑一次：结构对不对，只有三件套互相找得到彼此才算数。
-          ./dist/JabGrab.app/Contents/MacOS/jabgrab --selftest
+          #
+          # 不断言退出码：runner 上没有 ffmpeg，而 ffmpeg 是 dl-re 的启动期硬依赖，
+          # 自检会因此返回 1（本地装了 ffmpeg 才是 0）。要验的是「爬取程序与下载器
+          # 都在、且都来自随包」，所以断言输出内容，而不是退出码 —— 否则这条检查
+          # 测的是 runner 装没装 ffmpeg。
+          SELF="$(./dist/JabGrab.app/Contents/MacOS/jabgrab --selftest || true)"
+          echo "$SELF"
+          if [ "$(grep -c '来源: 随包' <<<"$SELF" || true)" -lt 2 ]; then
+            echo "自检没有报告两份随包来源（爬取程序与下载器应各一次）" >&2
+            exit 1
+          fi
+          if grep -qE "未找到爬取程序|未找到 N_m3u8DL-RE" <<<"$SELF"; then
+            echo "自检报告三件套缺失" >&2
+            exit 1
+          fi
 
           PKG="$PWD/jabgrab_${VERSION}_full_darwin_${{ matrix.goarch }}.zip"
           ( cd dist && zip -qry "$PKG" JabGrab.app tools )
@@ -239,6 +256,7 @@ jobs:
           rm -rf out && mkdir -p out/scraper out/dlre
           cp -R python/build/pyi/dist/jab-scrape/. out/scraper/
           cp go/third_party/N_m3u8DL-RE.exe out/dlre/
+          find out -type l -exec ls -l {} \; || true
           cd go
           go run ./cmd/manifestgen -pack -src ../out/scraper -name scraper -binary jab-scrape \
             -protocol 1 -slug windows -arch amd64 -out-dir ../out
@@ -323,9 +341,20 @@ jobs:
           # 必须 Start-Process -Wait：wails 生产构建给 Windows 产物加了 -H windowsgui，
           # 是 GUI 子系统程序，用 & 调用时 PowerShell 不会等待退出，$LASTEXITCODE
           # 保持 $null，而 $null -ne 0 为真 —— 自检明明通过也会被误判成失败。
+          #
+          # 同样不拿退出码当判据：runner 上没有 ffmpeg，自检会因此返回 1。断言换成
+          # 「输出里两份随包来源都在、且没有报组件缺失」，这才是组装步骤该保证的事。
+          $selftest = Join-Path $PWD 'selftest.txt'
           $proc = Start-Process -FilePath (Join-Path $PWD 'dist\jabgrab.exe') `
-            -ArgumentList '--selftest' -NoNewWindow -Wait -PassThru
-          if ($proc.ExitCode -ne 0) { throw "整包自检失败（exit $($proc.ExitCode)）" }
+            -ArgumentList '--selftest' -NoNewWindow -Wait -PassThru `
+            -RedirectStandardOutput $selftest
+          $text = Get-Content $selftest -Raw
+          Write-Host $text
+          if (-not $text) { throw "自检没有输出（exit $($proc.ExitCode)）" }
+          $bundled = ($text -split "`n" | Where-Object { $_ -match '来源: 随包' }).Count
+          if ($bundled -lt 2) { throw "自检只报告了 $bundled 份随包来源（应为 2）" }
+          if ($text -match '未找到爬取程序|未找到 N_m3u8DL-RE') { throw '自检报告三件套缺失' }
+          Remove-Item $selftest -Force
 
           $PKG = Join-Path $PWD "jabgrab_${VERSION}_full_windows_amd64.zip"
           Push-Location dist
