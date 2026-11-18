@@ -262,6 +262,38 @@ func (a *App) Start() error {
 	return nil
 }
 
+// ClearDownloaded 把本轮已下好（完成 / 已存在）的 URL 从 txt 里删掉。
+//
+// 一次几十条里总掺着几条失败或没跑到，所以只删成功的那些：剩下的恰好就是
+// 下一轮要重试的清单，再点「开始」只跑这几条。失败的、未处理的、注释与空行
+// 全部原样留在文件里。
+func (a *App) ClearDownloaded() (pipeline.PruneResult, error) {
+	a.mu.Lock()
+	runner := a.runner
+	cfg := a.cfg
+	a.mu.Unlock()
+
+	if runner == nil {
+		return pipeline.PruneResult{}, errors.New("应用尚未初始化")
+	}
+	// 运行中不动文件：状态还在往外推，删完列表与文件必然对不上，
+	// 而且此时被删的行里可能正有一条马上要重试。
+	if runner.Running() {
+		return pipeline.PruneResult{}, errors.New("任务正在运行，请先停止再清理")
+	}
+	if strings.TrimSpace(cfg.TxtPath) == "" {
+		return pipeline.PruneResult{}, errors.New("请先在设置里选择待下载 txt 文件")
+	}
+
+	var done []string
+	for _, it := range runner.Snapshot().Items {
+		if pipeline.Downloaded(it.Status) {
+			done = append(done, it.URL)
+		}
+	}
+	return pipeline.PruneURLs(cfg.TxtPath, done)
+}
+
 // Stop 停止当前任务（杀掉 dl-re / 爬取进程组）。
 func (a *App) Stop() {
 	a.mu.Lock()

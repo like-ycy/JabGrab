@@ -306,6 +306,8 @@ function setRunning(running) {
     el("btnStart").disabled = running;
     el("btnStop").disabled = !running;
     el("btnPickTxt").disabled = running;
+    // 运行中不能改 txt：这一轮还在往里写状态，删完列表与文件必然对不上。
+    el("btnPrune").disabled = running;
 }
 
 /* ---------- 日志 ---------- */
@@ -629,6 +631,34 @@ function bindButtons() {
     el("btnStop").addEventListener("click", async () => {
         await api().Stop();
         appendLog({ level: "warn", text: "已请求停止" });
+    });
+
+    // 把成功的那些 URL 从清单里抹掉，失败的留下：下一次「开始」就只重试剩下的。
+    el("btnPrune").addEventListener("click", async () => {
+        try {
+            const res = await api().ClearDownloaded();
+            const file = baseName((res && res.path) || "txt");
+            if (!res || !res.removed) {
+                // 两种可能：本轮没有成功的条目，或清单里早就没有这些行了
+                // （上次已清理 / 换了 txt）。话术上不猜是哪一种。
+                appendLog({
+                    level: "info",
+                    text: `没有可删除的 URL：${file} 里找不到本轮已下载的条目（清单还剩 ${
+                        res ? res.kept : 0
+                    } 条）`,
+                });
+                return;
+            }
+            appendLog({
+                level: "info",
+                text: `已从 ${file} 删除 ${res.removed} 条已下载 URL，清单剩余 ${
+                    res.kept
+                } 条 —— 下次「开始」只跑这几条`,
+            });
+            el("summaryDetail").textContent = `已清理 ${res.removed} 条 · 清单剩余 ${res.kept} 条`;
+        } catch (err) {
+            appendLog({ level: "error", text: "清除已下载 URL 失败: " + err });
+        }
     });
 
     el("btnClearLog").addEventListener("click", () => {
