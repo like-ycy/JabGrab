@@ -378,3 +378,32 @@ func TestRunRejectsEmptyTxtPath(t *testing.T) {
 		t.Fatal("没有 txt 路径时应报错")
 	}
 }
+
+// 清除已下载之后要能把界面队列一起清空，且推给前端的是空快照而不是 null。
+func TestResetClearsQueue(t *testing.T) {
+	var got State
+	r := New(config.Default(), Hooks{OnState: func(s State) { got = s }})
+	r.state = State{Total: 2, Items: []Item{{URL: "u1", Status: StatusDone}, {URL: "u2", Status: StatusFailed}}}
+
+	if err := r.Reset(); err != nil {
+		t.Fatalf("不该报错: %v", err)
+	}
+	if st := r.Snapshot(); st.Total != 0 || len(st.Items) != 0 || st.Running {
+		t.Fatalf("队列应被清空: %+v", st)
+	}
+	if got.Items == nil {
+		t.Fatal("推送的空状态 Items 不应为 nil，前端会当成没拿到数据")
+	}
+	if len(got.Items) != 0 {
+		t.Fatalf("推送的状态应是空的: %+v", got)
+	}
+}
+
+// 运行中清队列会把列表与正在推进的进度对错位，必须拒绝。
+func TestResetRejectedWhileRunning(t *testing.T) {
+	r := New(config.Default(), Hooks{})
+	r.running = true
+	if err := r.Reset(); err == nil {
+		t.Fatal("运行中应拒绝清空队列")
+	}
+}

@@ -41,7 +41,7 @@
                         <button id="btnStart" class="primary">开始</button>
                         <button id="btnStop" class="danger" disabled>停止</button>
                         <button id="btnPrune"
-                                title="把本轮已下载成功（完成 / 已存在）的 URL 从 txt 里删掉，失败的留下等下次重试">
+                                title="把本轮已下载成功（完成 / 已存在）的 URL 从 txt 里删掉，失败的留下等下次重试；同时清空下面的任务队列">
                             清除已下载
                         </button>
                     </div>
@@ -67,11 +67,12 @@
                                 <th class="col-status">状态</th>
                                 <th class="col-progress">进度</th>
                                 <th class="col-speed">速度</th>
+                                <th class="col-play">播放</th>
                             </tr>
                         </thead>
                         <tbody id="taskBody">
                             <tr class="empty">
-                                <td colspan="7">还没有任务，选择 txt 后点“开始”</td>
+                                <td colspan="8">还没有任务，选择 txt 后点“开始”</td>
                             </tr>
                         </tbody>
                     </table>
@@ -131,6 +132,22 @@
                         <input id="pythonCmd" type="text" placeholder="留空则自动探测（同级 jab-scrape 或 uv run）" />
                     </div>
                     <div class="hint" id="scrapeHint"></div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>播放</h2>
+                <p class="hint">
+                    下载成功后，任务列表每一行右侧会出现「播放」按钮，点它用播放器打开这一条。
+                </p>
+                <div class="field">
+                    <label>播放器路径（可选）</label>
+                    <div class="input-row">
+                        <input id="playerPath" type="text"
+                               placeholder="留空用系统默认播放器，如 C:\Program Files\DAUM\PotPlayer\PotPlayerMini64.exe" />
+                        <button data-pick="player">选择…</button>
+                    </div>
+                    <div class="hint" id="playerHint"></div>
                 </div>
             </div>
 

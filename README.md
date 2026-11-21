@@ -15,7 +15,10 @@ Python 侧车 `jab-scrape` 负责用浏览器抓取 m3u8 地址，实际下载�
 - **跳过已存在**：按文件名与大小判断，已下载过的直接标 `已存在`，不重复花流量。
 - **清单自清理**：点「清除已下载」把本轮成功的 URL（`完成` 与 `已存在`）从 txt 里删掉，
   失败与未处理的留在原处——下次点「开始」就只重试这几条。注释、空行、行尾符原样保留。
+  界面上的任务队列同时清空，不留上一轮的状态。
 - **中文字幕版优先**：页面带中文字幕时文件名追加 `-C`，这一份落地后再清理同名的普通版旧档。
+- **一键播放**：下载成功的每一行右侧出现「播放」按钮，点开就用系统默认播放器（也可指定
+  PotPlayer 等）打开这一条。不会自动播，什么时候看由你决定。
 - **组件按需下载**：默认轻量包只有外壳（约 4.6 MB），缺爬取程序 / 下载器时在设置页一键装。
 - **可诊断**：`--selftest` 不开窗口，直接打印三件套（爬取程序 / 下载器 / ffmpeg）各自从哪来。
 
@@ -104,6 +107,7 @@ brew install ffmpeg
 | `dlrPath` | 空 | 留空走定位链 |
 | `pythonCmd` | 空 | 留空则自动探测，可填 `uv run --project /path/to/python jab-scrape` |
 | `ffmpegPath` | 空 | 留空走定位链（含下载器同目录） |
+| `playerPath` | 空 | 点行内「播放」时用哪个播放器：留空交给系统默认，可填 PotPlayer 等可执行文件，成品路径作为唯一参数传入 |
 | `componentsOnDemand` | `true` | 只是「缺组件时是否显示下载入口」，已装的组件永远生效 |
 | `componentMirror` | 空 | 组件下载源前缀，空则直连 GitHub |
 | `sites` | jable / missav 均启用 | 每项 `{enabled, keyword}`，URL 含 keyword（不区分大小写）即归属该站点；命中多个取关键字最长的 |
@@ -184,6 +188,7 @@ go/
     scraper/         调 Python 侧车，解析单行 JSON
     downloader/      拼 N_m3u8DL-RE 参数，解析进度帧
     pipeline/        主流程：读 txt → 去重分类 → 逐条爬取 → 下载
+    player/          打开成品：系统默认程序（ShellExecuteW / open）或自定义播放器
     component/       组件清单、下载、校验、安装、文件锁
     proc/            跨平台子进程（Windows 无黑窗 / UTF-8 输出）
   frontend/dist/     原生 JS 界面，构建时 embed

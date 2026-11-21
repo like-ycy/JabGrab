@@ -46,6 +46,15 @@ type Config struct {
 	PythonCmd  string   `json:"pythonCmd"`  // 爬取命令，空则自动探测
 	FFmpegPath string   `json:"ffmpegPath"` // ffmpeg 路径，空则组件/同级目录/PATH
 
+	// 播放
+	//
+	// PlayerPath 为空表示用系统默认关联程序；填了就是自定义播放器
+	// （Windows 上常见的是 PotPlayer），成品视频作为唯一参数传给它。
+	//
+	// 播放只由用户在列表里点「播放」触发，不做自动播放；也因此不参与 Check
+	// 的闸门校验 —— Check 是「开始下载」的门槛，播放器填错不该把人挡在下载之外。
+	PlayerPath string `json:"playerPath"`
+
 	// 组件（按需下载的外部程序：scraper / dlre）
 	//
 	// 用 *bool 而不是 bool：零值是 false，而「用户没设置过」与「用户关掉了」

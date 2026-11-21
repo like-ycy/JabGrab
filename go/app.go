@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"jabgrab/internal/config"
 	"jabgrab/internal/locate"
 	"jabgrab/internal/pipeline"
+	"jabgrab/internal/player"
 	"jabgrab/internal/proc"
 )
 
@@ -222,6 +224,29 @@ func (a *App) SelectDlr() (string, error) {
 	})
 }
 
+// SelectPlayer 选择自定义播放器（如 Windows 上的 PotPlayer.exe）。
+func (a *App) SelectPlayer() (string, error) {
+	opts := runtime.OpenDialogOptions{Title: "选择播放器可执行文件（留空则用系统默认）"}
+	// 只对 Windows 限扩展名：macOS 上用户往往要选 .app 包，限死了反而选不到。
+	if goruntime.GOOS == "windows" {
+		opts.Filters = []runtime.FileFilter{
+			{DisplayName: "可执行文件 (*.exe)", Pattern: "*.exe"},
+		}
+	}
+	return runtime.OpenFileDialog(a.ctx, opts)
+}
+
+// PlayFile 用配置好的播放器打开成品视频（列表里每行的「播放」按钮）。
+//
+// 用的是当前配置而不是启动时的那份：设置页改完播放器路径立刻生效。
+func (a *App) PlayFile(path string) error {
+	a.mu.Lock()
+	playerPath := a.cfg.PlayerPath
+	a.mu.Unlock()
+
+	return player.Open(playerPath, path)
+}
+
 // Start 启动流水线，立即返回，进度通过事件推送。
 func (a *App) Start() error {
 	a.mu.Lock()
@@ -262,11 +287,14 @@ func (a *App) Start() error {
 	return nil
 }
 
-// ClearDownloaded 把本轮已下好（完成 / 已存在）的 URL 从 txt 里删掉。
+// ClearDownloaded 把本轮已下好（完成 / 已存在）的 URL 从 txt 里删掉，并清空界面上的队列。
 //
 // 一次几十条里总掺着几条失败或没跑到，所以只删成功的那些：剩下的恰好就是
 // 下一轮要重试的清单，再点「开始」只跑这几条。失败的、未处理的、注释与空行
 // 全部原样留在文件里。
+//
+// 删完之后列表也一起清空：txt 里成功的行已经没了，界面上再挂着上一轮的完成
+// 状态只会让人以为还有活没干完；下一次「开始」本来就从剩下的几行重新建队列。
 func (a *App) ClearDownloaded() (pipeline.PruneResult, error) {
 	a.mu.Lock()
 	runner := a.runner
@@ -291,7 +319,17 @@ func (a *App) ClearDownloaded() (pipeline.PruneResult, error) {
 			done = append(done, it.URL)
 		}
 	}
-	return pipeline.PruneURLs(cfg.TxtPath, done)
+
+	res, err := pipeline.PruneURLs(cfg.TxtPath, done)
+	if err != nil {
+		// txt 没改成，队列保持原样：让用户看得见哪几条还没处理。
+		return res, err
+	}
+	if rerr := runner.Reset(); rerr != nil {
+		// 清队列只是收尾，txt 已经处理过了；真失败也只提示，不回滚。
+		a.emit("pipeline:log", LogLine{Level: "warn", Text: "清单已清理，但队列未能清空: " + rerr.Error()})
+	}
+	return res, nil
 }
 
 // Stop 停止当前任务（杀掉 dl-re / 爬取进程组）。

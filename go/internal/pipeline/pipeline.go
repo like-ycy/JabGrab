@@ -48,6 +48,9 @@ type Item struct {
 	ETA        string   `json:"eta"`
 	Downloaded string   `json:"downloaded"`
 	TotalSize  string   `json:"totalSize"`
+	// Path 是成品视频的绝对路径，只在「完成」与「已存在」时有值。
+	// 前端据此决定要不要给这一行放播放按钮；真正启动播放器的是上层。
+	Path string `json:"path"`
 }
 
 // State 是推给前端的完整快照。
@@ -101,6 +104,25 @@ func (r *Runner) Running() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.running
+}
+
+// Reset 清空任务列表（不动 txt）。
+//
+// 用在「清除已下载」之后：txt 里成功的 URL 已经删掉，界面上再挂着上一轮的
+// 完成 / 失败状态只会让人以为还有活没干完。运行中不允许清：这一轮还在往里
+// 写状态，清完列表与进度必然对不上。
+func (r *Runner) Reset() error {
+	r.mu.Lock()
+	if r.running {
+		r.mu.Unlock()
+		return errors.New("任务正在运行，请先停止")
+	}
+	r.state = State{}
+	st := cloneState(r.state)
+	r.mu.Unlock()
+
+	r.emitState(st)
+	return nil
 }
 
 // Stop 请求停止：取消 ctx 会杀掉当前爬取/下载进程组。
@@ -267,6 +289,8 @@ func (r *Runner) process(
 		r.patch(idx, func(it *Item) {
 			it.Status = StatusSkipped
 			it.Message = "已存在: " + filepath.Base(exists)
+			// 跳过的那份也是成品，同样给个播放按钮，不用去目录里翻。
+			it.Path = absPath(exists)
 		})
 		r.logf("info", fmt.Sprintf("[%d/%d] 跳过 %s（文件已存在）", idx+1, total, name))
 		return nil
@@ -313,12 +337,24 @@ func (r *Runner) process(
 		r.dropPlainVideo(idx+1, total, cfg.SaveDir, saveDir, plain)
 	}
 
+	// 成品路径要回填给前端：列表里的「播放」按钮靠它。
+	// dl-re 的混流结果后缀取决于参数（默认 mp4，也可能保留 mkv/ts），
+	// 所以按目录实际存在的文件找，而不是拼一个假想的 .mp4。
+	outPath := existingVideo(saveDir, name)
+	if outPath == "" {
+		outPath = findExisting(cfg.SaveDir, saveDir, name)
+	}
+	if outPath == "" {
+		r.logf("debug", fmt.Sprintf("[%d/%d] 下载已结束，但在 %s 下没找到成品文件", idx+1, total, saveDir))
+	}
+
 	r.patch(idx, func(it *Item) {
 		it.Status = StatusDone
 		it.Percent = 100
 		it.Message = "完成"
 		it.Speed = ""
 		it.ETA = ""
+		it.Path = absPath(outPath)
 	})
 	r.logf("info", fmt.Sprintf("[%d/%d] 完成 %s → %s", idx+1, total, name, saveDir))
 	return nil
@@ -490,6 +526,20 @@ func existingVideo(dir, name string) string {
 		}
 	}
 	return ""
+}
+
+// absPath 尽量把成品路径转成绝对路径。
+//
+// 送给播放器的路径必须是绝对的：相对路径会按 wails 进程的工作目录解析，
+// 用户从 Dock / 开始菜单启动时那个目录与保存目录毫无关系。
+func absPath(p string) string {
+	if p == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(p); err == nil {
+		return abs
+	}
+	return p
 }
 
 // videoExts 是成品视频可能的后缀，取决于 dl-re 的混流结果。

@@ -421,6 +421,25 @@ body.resizing * {
     text-align: right;
 }
 
+/* 播放按钮列：只在成品存在时才有内容，宽度固定，避免状态刷新时列表左右跳。 */
+.col-play {
+    width: 78px;
+    text-align: right;
+}
+
+.play-btn {
+    padding: 3px 9px;
+    font-size: 11px;
+    border: 1px solid var(--border);
+    color: var(--accent);
+    white-space: nowrap;
+}
+
+.play-btn:hover:not(:disabled) {
+    background: var(--accent-soft);
+    border-color: #cfdcff;
+}
+
 .cell-name {
     max-width: 320px;
 }

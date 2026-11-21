@@ -31,6 +31,7 @@ const LOG_LIMIT = 2000;
 async function boot() {
     bindTabs();
     bindButtons();
+    bindTaskActions();
     bindPaneDivider();
 
     if (!api()) {
@@ -90,6 +91,7 @@ function normalize(cfg) {
     c.dlrPath = c.dlrPath || "";
     c.pythonCmd = c.pythonCmd || "";
     c.ffmpegPath = c.ffmpegPath || "";
+    c.playerPath = c.playerPath || "";
     c.componentMirror = c.componentMirror || "";
     c.componentsOnDemand = c.componentsOnDemand !== false;
     c.sites = c.sites || {};
@@ -203,6 +205,14 @@ function renderEnv(info) {
             : "未找到 ffmpeg —— 下载器启动时会拒绝运行";
         el("ffmpegHint").className = "hint" + (info.ffmpegPath ? "" : " bad");
     }
+
+    if (el("playerHint")) {
+        const custom = (info.config && info.config.playerPath) || "";
+        el("playerHint").textContent = custom
+            ? "行内「播放」按钮走这个播放器，成品路径作为唯一参数传给它"
+            : "留空则交给系统默认播放器（双击文件时打开的那个）；Windows 上可填 PotPlayerMini64.exe";
+        el("playerHint").className = "hint";
+    }
 }
 
 /* ---------- 任务状态渲染 ---------- */
@@ -215,7 +225,7 @@ function renderState(s) {
     const body = el("taskBody");
 
     if (items.length === 0) {
-        body.innerHTML = '<tr class="empty"><td colspan="7">没有可处理的任务，请选择 txt 并确认已启用站点</td></tr>';
+        body.innerHTML = '<tr class="empty"><td colspan="8">没有可处理的任务，请选择 txt 并确认已启用站点</td></tr>';
         setOverall(0);
         el("summaryText").textContent = "等待开始";
         el("summaryDetail").textContent = "";
@@ -242,6 +252,13 @@ function renderState(s) {
 
         const speed = it.speed ? `${it.speed}${it.eta ? " · " + it.eta : ""}` : "";
 
+        // 只有下好的（完成 / 已存在）才有成品路径；其它状态留个空单元格，
+        // 免得整列按钮在下载途中点不动还闪来闪去。
+        const playCell = it.path
+            ? `<button class="play-btn" data-play="${escapeHtml(it.path)}"
+                       title="播放 ${escapeHtml(it.path)}">▶ 播放</button>`
+            : "";
+
         // 演员名在爬取完成后才有；取不到时留占位符，避免整列空白看不出区别。
         const actors = Array.isArray(it.actors) ? it.actors.filter(Boolean) : [];
         const actorText = actors.join("、");
@@ -260,6 +277,7 @@ function renderState(s) {
             <td class="col-status"><span class="tag ${st}">${STATUS_TEXT[st] || st}</span></td>
             <td class="col-progress">${progress}</td>
             <td class="col-speed speed-cell">${escapeHtml(speed)}</td>
+            <td class="col-play">${playCell}</td>
         </tr>`;
     });
 
@@ -308,6 +326,26 @@ function setRunning(running) {
     el("btnPickTxt").disabled = running;
     // 运行中不能改 txt：这一轮还在往里写状态，删完列表与文件必然对不上。
     el("btnPrune").disabled = running;
+}
+
+/* ---------- 播放 ---------- */
+
+// 列表每次状态更新都重建 innerHTML，按钮是一次性的，所以用事件委托绑一次。
+function bindTaskActions() {
+    el("taskBody").addEventListener("click", (event) => {
+        const btn = event.target.closest("[data-play]");
+        if (btn) playFile(btn.dataset.play);
+    });
+}
+
+async function playFile(path) {
+    if (!api()) return;
+    try {
+        await api().PlayFile(path);
+        appendLog({ level: "info", text: `已交给播放器：${baseName(path)}` });
+    } catch (err) {
+        appendLog({ level: "error", text: "播放失败: " + err });
+    }
 }
 
 /* ---------- 日志 ---------- */
@@ -515,6 +553,7 @@ function renderSettings(cfg) {
     el("dlrPath").value = cfg.dlrPath;
     el("pythonCmd").value = cfg.pythonCmd;
     if (el("ffmpegPath")) el("ffmpegPath").value = cfg.ffmpegPath;
+    if (el("playerPath")) el("playerPath").value = cfg.playerPath;
     if (el("componentMirror")) el("componentMirror").value = cfg.componentMirror;
     if (el("componentsOnDemand")) el("componentsOnDemand").checked = cfg.componentsOnDemand !== false;
 
@@ -580,6 +619,7 @@ function collectConfig() {
     cfg.dlrPath = el("dlrPath").value.trim();
     cfg.pythonCmd = el("pythonCmd").value.trim();
     if (el("ffmpegPath")) cfg.ffmpegPath = el("ffmpegPath").value.trim();
+    if (el("playerPath")) cfg.playerPath = el("playerPath").value.trim();
     if (el("componentMirror")) cfg.componentMirror = el("componentMirror").value.trim();
     if (el("componentsOnDemand")) cfg.componentsOnDemand = el("componentsOnDemand").checked;
     cfg.scrapeTimeoutSec = intVal("scrapeTimeoutSec", 180);
@@ -634,6 +674,7 @@ function bindButtons() {
     });
 
     // 把成功的那些 URL 从清单里抹掉，失败的留下：下一次「开始」就只重试剩下的。
+    // txt 里的行删掉后，界面上的任务队列也一并清空（后端一起做了）。
     el("btnPrune").addEventListener("click", async () => {
         try {
             const res = await api().ClearDownloaded();
@@ -645,7 +686,7 @@ function bindButtons() {
                     level: "info",
                     text: `没有可删除的 URL：${file} 里找不到本轮已下载的条目（清单还剩 ${
                         res ? res.kept : 0
-                    } 条）`,
+                    } 条），任务队列已清空`,
                 });
                 return;
             }
@@ -653,9 +694,8 @@ function bindButtons() {
                 level: "info",
                 text: `已从 ${file} 删除 ${res.removed} 条已下载 URL，清单剩余 ${
                     res.kept
-                } 条 —— 下次「开始」只跑这几条`,
+                } 条 —— 任务队列已清空，下次「开始」只跑剩下的`,
             });
-            el("summaryDetail").textContent = `已清理 ${res.removed} 条 · 清单剩余 ${res.kept} 条`;
         } catch (err) {
             appendLog({ level: "error", text: "清除已下载 URL 失败: " + err });
         }
@@ -677,6 +717,7 @@ function bindButtons() {
                 txt: bind.SelectTxt,
                 saveDir: bind.SelectDir,
                 dlr: bind.SelectDlr,
+                player: bind.SelectPlayer,
             };
             const fn = pickers[kind];
             if (!fn) return;
@@ -685,6 +726,7 @@ function bindButtons() {
             if (kind === "saveDir") el("saveDir").value = p;
             if (kind === "txt") el("txtPathInput").value = p;
             if (kind === "dlr") el("dlrPath").value = p;
+            if (kind === "player") el("playerPath").value = p;
         });
     });
 
