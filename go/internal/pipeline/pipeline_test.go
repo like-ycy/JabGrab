@@ -156,6 +156,83 @@ func TestFindExisting(t *testing.T) {
 	}
 }
 
+// 清理这一步无论结局如何都要在运行日志里留痕：日志窗口里能看出它确实跑过。
+// 「没删东西」和「没执行」在界面上必须能区分开。
+func TestDropPlainVideoLogsEveryOutcome(t *testing.T) {
+	root := t.TempDir()
+	actor := filepath.Join(root, "釈アリス")
+	if err := os.MkdirAll(actor, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	newRunner := func() (*Runner, *[]string) {
+		var logs []string
+		r := New(config.Default(), Hooks{OnLog: func(level, text string) {
+			logs = append(logs, level+" "+text)
+		}})
+		return r, &logs
+	}
+
+	// 从没下过普通版：也要有一行 info 交代「无需清理」
+	r, logs := newRunner()
+	r.dropPlainVideo(1, 2, root, actor, "ABC-123")
+	if !hasLog(*logs, "info", "没有同名的非中文字幕旧档需要清理") {
+		t.Fatalf("无旧档时应写一行日志 got=%v", *logs)
+	}
+
+	// 普通版 + 完整的中文字幕版：删除动作本身也要进日志，并带上被删的路径
+	plain := filepath.Join(actor, "ABC-123.mp4")
+	sub := filepath.Join(actor, "ABC-123-C.mp4")
+	for _, p := range []string{plain, sub} {
+		if err := os.WriteFile(p, bytes.Repeat([]byte("x"), 1000), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, logs = newRunner()
+	r.dropPlainVideo(1, 2, root, actor, "ABC-123")
+	if !hasLog(*logs, "info", "已删除同名的非中文字幕旧档："+plain) {
+		t.Fatalf("删除后应写一行带路径的日志 got=%v", *logs)
+	}
+	if _, err := os.Stat(plain); !os.IsNotExist(err) {
+		t.Fatal("普通版应已删除")
+	}
+}
+
+func hasLog(logs []string, level, substr string) bool {
+	for _, l := range logs {
+		if strings.HasPrefix(l, level+" ") && strings.Contains(l, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// 「已存在」日志里要带体积：正片和残件的差别一眼可见，文档也这么承诺。
+func TestDescribeFile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "ABC-123.mp4")
+	if err := os.WriteFile(p, bytes.Repeat([]byte("x"), 2048), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := fileSize(p); got != "2.00KB" {
+		t.Fatalf("fileSize=%q want 2.00KB", got)
+	}
+	if got := describeFile(p); got != p+"（2.00KB）" {
+		t.Fatalf("describeFile=%q", got)
+	}
+	// 空文件与不存在的文件都不带大小，退回纯路径
+	empty := filepath.Join(dir, "empty.mp4")
+	if err := os.WriteFile(empty, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := describeFile(empty); got != empty {
+		t.Fatalf("空文件不应带大小 got=%q", got)
+	}
+	missing := filepath.Join(dir, "missing.mp4")
+	if got := describeFile(missing); got != missing {
+		t.Fatalf("不存在的文件应退回纯路径 got=%q", got)
+	}
+}
+
 func TestURLKey(t *testing.T) {
 	cases := map[string]string{
 		"https://jable.tv/videos/abc-123/":  "https://jable.tv/videos/abc-123",

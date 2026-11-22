@@ -282,6 +282,9 @@ func (r *Runner) process(
 		r.logf("info", fmt.Sprintf("[%d/%d] 演员 %s", idx+1, total, strings.Join(res.Actors, "、")))
 	}
 
+	// 下载前先看本地有没有这部片子的成品。结论对用户是要紧的（为什么没下载），
+	// 所以命中与未命中都写日志：只在跳过时打一行的话，日志里看不出检查到底做没做，
+	// 也看不出命中的是普通版还是中文字幕版。
 	if exists := findExistingVersion(cfg.SaveDir, saveDir, name); exists != "" {
 		// 跳过时不做任何删除：这里的「已存在」只按文件名和大小判断，
 		// 上次下载中断留下的非空残件也算存在。此时若删普通版，可能把完整的
@@ -292,9 +295,10 @@ func (r *Runner) process(
 			// 跳过的那份也是成品，同样给个播放按钮，不用去目录里翻。
 			it.Path = absPath(exists)
 		})
-		r.logf("info", fmt.Sprintf("[%d/%d] 跳过 %s（文件已存在）", idx+1, total, name))
+		r.logf("info", fmt.Sprintf("[%d/%d] 本地已有成品，跳过下载：%s", idx+1, total, describeFile(exists)))
 		return nil
 	}
+	r.logf("info", fmt.Sprintf("[%d/%d] 本地没有同名成品（含 -C 中文字幕版），开始下载", idx+1, total))
 
 	r.patch(idx, func(it *Item) {
 		it.Status = StatusDownloading
@@ -365,27 +369,39 @@ func (r *Runner) process(
 // 两道门槛，都是为了不把好文件删掉：
 //  1. 本地没有中文字幕版 —— 什么都不做；
 //  2. 中文字幕版明显小于普通版 —— 当作没下完（见 subtitleComplete）。
+//
+// 三种结局都写日志（删了 / 没有旧档 / 因为残件保留），日志窗口里要能看出这一步
+// 确实跑过，而不是「没打印 = 没执行」。
 func (r *Runner) dropPlainVideo(pos, total int, root, saveDir, plain string) {
 	plainPath := findExisting(root, saveDir, plain)
 	if plainPath == "" {
-		return // 没有普通版旧档，无需清理
+		// 从没下过普通版是常态，仍留一行：否则用户无法判断清理有没有执行。
+		r.logf("info", fmt.Sprintf("[%d/%d] 没有同名的非中文字幕旧档需要清理", pos, total))
+		return
 	}
 	subPath := existingVideo(saveDir, plain+chineseSubSuffix)
 	if subPath == "" {
 		subPath = findExisting(root, saveDir, plain+chineseSubSuffix)
 	}
 	if subPath == "" {
+		r.logf("warn", fmt.Sprintf(
+			"[%d/%d] 找到非中文字幕旧档 %s，但没找到中文字幕版，暂不删除",
+			pos, total, describeFile(plainPath)))
 		return
 	}
 	if !subtitleComplete(subPath, plainPath) {
 		r.logf("warn", fmt.Sprintf(
-			"[%d/%d] 中文字幕版可能未下载完整，暂不删除 %s", pos, total, plainPath))
+			"[%d/%d] 中文字幕版可能未下载完整（%s），暂不删除 %s",
+			pos, total, describeFile(subPath), describeFile(plainPath)))
 		return
 	}
 
 	removed, err := removePlainVideo(root, saveDir, plain)
 	for _, p := range removed {
-		r.logf("info", fmt.Sprintf("[%d/%d] 删除非中文字幕旧档 %s", pos, total, p))
+		r.logf("info", fmt.Sprintf("[%d/%d] 已删除同名的非中文字幕旧档：%s", pos, total, p))
+	}
+	if len(removed) == 0 && err == nil {
+		r.logf("info", fmt.Sprintf("[%d/%d] 没有可清理的非中文字幕旧档", pos, total))
 	}
 	if err != nil {
 		// 清理只是顺手收拾旧档，失败了不能让本次下载算失败。
@@ -540,6 +556,36 @@ func absPath(p string) string {
 		return abs
 	}
 	return p
+}
+
+// describeFile 把路径写成日志里的样子：带大小的「路径（1.20GB）」。
+// 命中「已存在」时体积是最有用的旁证 —— 一眼看出是正片还是上次中断的残件；
+// stat 失败（文件刚被挪走）时退回纯路径，不影响日志本身。
+func describeFile(path string) string {
+	if size := fileSize(path); size != "" {
+		return fmt.Sprintf("%s（%s）", path, size)
+	}
+	return path
+}
+
+// fileSize 返回人类可读的文件大小，取不到或为空文件时返回空串。
+func fileSize(path string) string {
+	st, err := os.Stat(path)
+	if err != nil || st.Size() <= 0 {
+		return ""
+	}
+	const unit = 1024
+	units := []string{"B", "KB", "MB", "GB", "TB"}
+	size := float64(st.Size())
+	i := 0
+	for size >= unit && i < len(units)-1 {
+		size /= unit
+		i++
+	}
+	if i == 0 {
+		return fmt.Sprintf("%dB", st.Size())
+	}
+	return fmt.Sprintf("%.2f%s", size, units[i])
 }
 
 // videoExts 是成品视频可能的后缀，取决于 dl-re 的混流结果。
