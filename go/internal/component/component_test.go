@@ -1,6 +1,7 @@
 package component
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -93,7 +94,7 @@ func TestRemoveDeletesEverything(t *testing.T) {
 	spec, _ := serve(t, standardPackage(t))
 	mustInstall(t, m, spec)
 
-	if err := m.Remove("scraper"); err != nil {
+	if err := m.Remove(context.Background(), "scraper"); err != nil {
 		t.Fatalf("移除失败: %v", err)
 	}
 	if got := m.State(spec); got != Missing {
@@ -127,7 +128,7 @@ func TestCleanupStaleRemovesOldVersionsAndStaging(t *testing.T) {
 		t.Fatalf("造半成品目录: %v", err)
 	}
 
-	if err := m.CleanupStale(); err != nil {
+	if err := m.CleanupStale(context.Background()); err != nil {
 		t.Fatalf("清理失败: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(root, "scraper-0.4.3")); !os.IsNotExist(err) {
@@ -158,7 +159,7 @@ func TestCleanupStaleKeepsVersionsWhenPointerUnreadable(t *testing.T) {
 	if err := os.MkdirAll(staging, 0o755); err != nil {
 		t.Fatalf("造半成品目录: %v", err)
 	}
-	if err := m.CleanupStale(); err != nil {
+	if err := m.CleanupStale(context.Background()); err != nil {
 		t.Fatalf("清理失败: %v", err)
 	}
 
@@ -180,7 +181,7 @@ func TestVerifyDetectsTruncatedFile(t *testing.T) {
 	spec, _ := serve(t, standardPackage(t))
 	mustInstall(t, m, spec)
 
-	if err := m.Verify("scraper"); err != nil {
+	if err := m.Verify(context.Background(), "scraper"); err != nil {
 		t.Fatalf("刚装好的组件不应报错：%v", err)
 	}
 
@@ -188,7 +189,7 @@ func TestVerifyDetectsTruncatedFile(t *testing.T) {
 	if err := os.WriteFile(target, []byte("short"), 0o644); err != nil {
 		t.Fatalf("截断文件: %v", err)
 	}
-	err := m.Verify("scraper")
+	err := m.Verify(context.Background(), "scraper")
 	if err == nil {
 		t.Fatal("文件被截断却校验通过")
 	}

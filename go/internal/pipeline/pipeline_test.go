@@ -398,15 +398,16 @@ func TestFindExistingVersion(t *testing.T) {
 	}
 	plain := filepath.Join(actor, "ABC-123.mp4")
 	sub := filepath.Join(actor, "ABC-123-C.mp4")
+	r := &Runner{}
 
 	// 本地只有普通版：普通版链接跳过，中文字幕版链接照下
 	if err := os.WriteFile(plain, []byte("data"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := findExistingVersion(root, actor, "ABC-123"); got != plain {
+	if got := r.findExistingVersion(root, actor, "ABC-123"); got != plain {
 		t.Fatalf("普通版应命中 got=%q", got)
 	}
-	if got := findExistingVersion(root, actor, "ABC-123-C"); got != "" {
+	if got := r.findExistingVersion(root, actor, "ABC-123-C"); got != "" {
 		t.Fatalf("只有普通版时中文字幕版不应跳过 got=%q", got)
 	}
 
@@ -414,10 +415,10 @@ func TestFindExistingVersion(t *testing.T) {
 	if err := os.WriteFile(sub, []byte("data"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := findExistingVersion(root, actor, "ABC-123-C"); got != sub {
+	if got := r.findExistingVersion(root, actor, "ABC-123-C"); got != sub {
 		t.Fatalf("中文字幕版应命中 got=%q", got)
 	}
-	if got := findExistingVersion(root, actor, "ABC-123"); got != plain {
+	if got := r.findExistingVersion(root, actor, "ABC-123"); got != plain {
 		t.Fatalf("普通版应命中已有普通版 got=%q", got)
 	}
 }

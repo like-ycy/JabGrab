@@ -16,7 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
+	"time"
 
 	"jabgrab/internal/proc"
 )
@@ -239,7 +239,9 @@ func (o Options) Run(
 	cmd.Env = childEnv()
 	proc.Prepare(cmd)
 	cmd.Cancel = func() error { return proc.Kill(cmd) }
-	cmd.WaitDelay = 0
+	// kill 失败（进程僵死、管道被子进程持有）时给 Wait 一个兜底超时，
+	// 否则整条流水线永久挂起，「停止」也救不回来。与 scraper 侧对齐。
+	cmd.WaitDelay = 5 * time.Second
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -253,7 +255,7 @@ func (o Options) Run(
 		return fmt.Errorf("启动 N_m3u8DL-RE 失败: %w", err)
 	}
 
-	tail := &ring{limit: 30}
+	tail := proc.NewRing(30)
 
 	var lastPct = -1.0
 	progressFn := func(line string) {
@@ -283,14 +285,14 @@ func (o Options) Run(
 		readOutput(stdout, func(line string) {
 			progressFn(line)
 			if !isProgressLine(line) {
-				tail.push(line)
+				tail.Push(line)
 				emit(line)
 			}
 		})
 	}()
 	go func() {
 		readOutput(stderr, func(line string) {
-			tail.push(line)
+			tail.Push(line)
 			emit(line)
 		})
 	}()
@@ -308,7 +310,7 @@ func (o Options) Run(
 		return fmt.Errorf("读取下载器日志失败: %w", readErr)
 	}
 	if waitErr != nil {
-		msg := tail.summary()
+		msg := tail.Summary()
 		if msg != "" {
 			return fmt.Errorf("下载失败: %v（%s）", waitErr, msg)
 		}
@@ -481,40 +483,6 @@ func emitLine(raw []byte, emit func(string)) error {
 	}
 	emit(line)
 	return nil
-}
-
-// ring 保存最后 N 行，用于错误摘要。
-//
-// stdout 与 stderr 各由一个协程写入，必须加锁，否则并发 append/切片会丢行甚至损坏数据。
-type ring struct {
-	mu    sync.Mutex
-	limit int
-	buf   []string
-}
-
-func (r *ring) push(s string) {
-	if strings.TrimSpace(s) == "" {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.buf = append(r.buf, s)
-	if len(r.buf) > r.limit {
-		r.buf = r.buf[1:]
-	}
-}
-
-func (r *ring) summary() string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if len(r.buf) == 0 {
-		return ""
-	}
-	line := strings.TrimSpace(r.buf[len(r.buf)-1])
-	if len(line) > 240 {
-		line = line[len(line)-240:]
-	}
-	return line
 }
 
 // SafeName 清理文件名中不安全的字符，避免标题里的斜杠等破坏保存路径。

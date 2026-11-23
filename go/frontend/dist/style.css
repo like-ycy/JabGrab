@@ -200,7 +200,25 @@ body {
     color: var(--text-warning);
     font-size: 12px;
     line-height: 1.7;
+}
+
+/* 问题清单是多行文本（\n 拼接），保留换行；其它横幅按普通行内排版，
+   否则源码里的缩进换行会被 pre-wrap 渲染成字面空白。 */
+#issueBanner {
     white-space: pre-wrap;
+}
+
+#componentBanner {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    /* 在 .view 内已有 16px 内边距，不再叠加横幅自身的外边距 */
+    margin: 0;
+}
+
+#componentBanner .link {
+    margin-left: 0;
 }
 
 main {
@@ -376,6 +394,28 @@ button.ghost {
     transition: width .2s;
 }
 
+/* 总体进度三段式：成功绿 / 失败红 / 当前蓝，一眼看出整轮的健康度 */
+.bar.segmented {
+    display: flex;
+}
+
+.bar.segmented>i {
+    border-radius: 0;
+    flex: 0 0 auto;
+}
+
+.bar.segmented .seg-ok {
+    background: var(--color-success);
+}
+
+.bar.segmented .seg-bad {
+    background: var(--color-danger);
+}
+
+.bar.segmented .seg-cur {
+    background: var(--color-primary);
+}
+
 .bar.small {
     height: 5px;
     width: 100%;
@@ -499,12 +539,9 @@ body.resizing * {
     width: 74px;
 }
 
-.col-status {
-    width: 78px;
-}
-
-.col-progress {
-    width: 156px;
+/* 状态与进度合并成一列：标签 + 进度条 / 失败原因都在这里 */
+.col-state {
+    width: 190px;
 }
 
 .col-speed {
@@ -512,23 +549,23 @@ body.resizing * {
     text-align: right;
 }
 
-/* 播放 / 打开文件夹按钮列：只在成品存在时才有内容，宽度固定，避免状态刷新时列表左右跳。 */
-.col-play {
-    width: 74px;
+/* 操作列：播放 / 文件夹 / 复制 / 重试 / 移除，宽度固定避免状态刷新时列表左右跳 */
+.col-actions {
+    width: 200px;
     text-align: right;
 }
 
-/* 「打开文件夹」比「播放」宽一点（五个字），但仍按内容收窄，别把名称列挤没了。 */
-.col-reveal {
-    width: 92px;
-    text-align: right;
+.cell-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 4px;
+    white-space: nowrap;
 }
 
-.play-btn,
-.reveal-btn {
-    padding: 3px 9px;
+button.mini {
+    padding: 2px 7px;
     font-size: 11px;
-    border: 1px solid var(--color-border);
+    border-radius: 6px;
     white-space: nowrap;
 }
 
@@ -538,7 +575,6 @@ body.resizing * {
 
 /* 打开文件夹是次要动作：常态压低，指上去再提亮。 */
 .reveal-btn {
-    padding: 3px 8px;
     color: var(--color-muted);
 }
 
@@ -550,6 +586,14 @@ body.resizing * {
 
 .reveal-btn:hover:not(:disabled) {
     color: var(--color-primary);
+}
+
+button.mini.danger-text {
+    color: var(--color-danger);
+}
+
+button.mini.danger-text:hover:not(:disabled) {
+    background: var(--color-danger-soft);
 }
 
 /* 名称 / URL 列不给宽度：固定布局下它吃掉剩下的那一份，块自己带省略号。 */
@@ -607,15 +651,31 @@ body.resizing * {
     color: var(--color-faint);
 }
 
-.progress-cell {
+/* 状态列：标签在上，进度条或说明文字在下 */
+.state-cell {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    align-items: flex-start;
+    gap: 4px;
+}
+
+.state-msg {
+    font-size: 11px;
+    color: var(--color-muted);
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.state-msg.err {
+    color: var(--color-danger);
 }
 
 .progress-meta {
     display: flex;
     justify-content: space-between;
+    width: 100%;
     color: var(--color-muted);
     font-size: 11px;
     /* 「1.2 GB」这种带空格的片段被拆开时很难看，整行不换行，宁可窄了截断。 */
@@ -631,6 +691,24 @@ body.resizing * {
 
 .row-failed .cell-name .name {
     color: var(--color-danger);
+}
+
+/* 失败行左侧一条红线，扫一眼就能定位 */
+.row-failed td:first-child {
+    border-left: 3px solid var(--color-danger);
+}
+
+/* 空状态：给一个直接能点的入口，而不是一句干巴巴的提示 */
+.empty-box {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 0;
+}
+
+.empty-box p {
+    margin: 0;
 }
 
 /* ---------- 日志 ---------- */
@@ -808,13 +886,6 @@ input[type="number"]:focus {
     max-width: 220px;
 }
 
-.save-row {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding-bottom: 6px;
-}
-
 /* 滚动条 */
 ::-webkit-scrollbar {
     width: 10px;
@@ -895,4 +966,260 @@ button.link {
     font-size: 12px;
     text-decoration: underline;
     cursor: pointer;
+}
+
+/* ---------- 环境徽标（可点击定位问题） ---------- */
+button.env {
+    border: 0;
+    background: transparent;
+    padding: 3px 8px;
+    border-radius: 6px;
+    font-size: 12px;
+    color: var(--color-muted);
+    max-width: 320px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+button.env:hover:not(:disabled) {
+    background: var(--color-surface-2);
+}
+
+button.env.ok {
+    color: var(--color-success);
+}
+
+button.env.bad {
+    color: var(--color-danger);
+    cursor: pointer;
+}
+
+.banner.flash {
+    animation: banner-flash .5s ease 2;
+}
+
+@keyframes banner-flash {
+    50% {
+        border-color: var(--color-warning);
+        box-shadow: 0 0 0 3px var(--color-warning-soft);
+    }
+}
+
+/* ---------- 日志工具条 ---------- */
+.log-tools {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+.log-filters {
+    display: flex;
+    gap: 2px;
+}
+
+button.chip {
+    border: 0;
+    background: transparent;
+    padding: 2px 9px;
+    font-size: 11px;
+    border-radius: 99px;
+    color: var(--color-muted);
+}
+
+button.chip:hover:not(:disabled) {
+    background: var(--color-surface-2);
+}
+
+button.chip.active {
+    background: var(--color-primary-soft);
+    color: var(--color-primary);
+    font-weight: 500;
+}
+
+#logSearch {
+    flex: 0 1 150px;
+    width: 150px;
+    padding: 3px 9px;
+    font-size: 11px;
+    border-radius: 99px;
+}
+
+#log .filtered {
+    display: none;
+}
+
+/* ---------- 轻提示 ---------- */
+.toasts {
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    z-index: 60;
+    pointer-events: none;
+}
+
+.toast {
+    pointer-events: auto;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-left: 3px solid var(--color-primary);
+    border-radius: 10px;
+    padding: 9px 14px;
+    font-size: 12px;
+    max-width: 340px;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, .18);
+    cursor: pointer;
+    animation: toast-in .18s ease;
+    transition: opacity .25s, transform .25s;
+}
+
+.toast.ok {
+    border-left-color: var(--color-success);
+}
+
+.toast.error {
+    border-left-color: var(--color-danger);
+}
+
+.toast.out {
+    opacity: 0;
+    transform: translateY(6px);
+}
+
+@keyframes toast-in {
+    from {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+}
+
+/* ---------- 确认弹窗 ---------- */
+.modal-mask {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, .45);
+    display: grid;
+    place-items: center;
+    z-index: 50;
+}
+
+.modal {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 14px;
+    padding: 18px 20px;
+    width: min(430px, calc(100vw - 48px));
+    box-shadow: 0 12px 40px rgba(0, 0, 0, .25);
+}
+
+.modal h3 {
+    margin: 0 0 8px;
+    font-size: 14px;
+}
+
+.modal p {
+    margin: 0 0 16px;
+    font-size: 12px;
+    color: var(--color-muted);
+    line-height: 1.7;
+    white-space: pre-wrap;
+}
+
+.modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+/* ---------- 设置页导航与保存条 ---------- */
+.settings-nav {
+    display: flex;
+    gap: 6px;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    /* 吸顶：锚点跳到下方卡片后导航仍可见。负边距盖住 .view 的内边距，
+       避免卡片从导航两侧的缝隙里滚过去。 */
+    position: sticky;
+    top: -14px; /* 抵消 .view 的 padding-top，吸顶时贴住滚动容器上沿 */
+    z-index: 6;
+    margin: -14px -16px 0;
+    padding: 10px 16px;
+    background: var(--color-background);
+}
+
+#view-settings>.card,
+#view-settings>details {
+    scroll-margin-top: 56px;
+}
+
+.settings-nav button {
+    font-size: 12px;
+    padding: 4px 13px;
+    border-radius: 99px;
+    color: var(--color-muted);
+}
+
+.save-bar {
+    position: sticky;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: 10px 16px;
+    transition: border-color .15s, box-shadow .15s;
+}
+
+.save-bar.dirty {
+    border-color: var(--border-primary);
+    box-shadow: 0 -4px 16px rgba(0, 0, 0, .1);
+}
+
+.save-actions {
+    display: flex;
+    gap: 8px;
+    flex: 0 0 auto;
+}
+
+.hint.warn-text {
+    color: var(--text-warning);
+}
+
+/* 下载参数折叠卡：常用设置一屏看完，调参才展开 */
+details.details-card>summary {
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--color-muted);
+    letter-spacing: .02em;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    user-select: none;
+}
+
+details.details-card>summary::-webkit-details-marker {
+    display: none;
+}
+
+details.details-card>summary::before {
+    content: "▸";
+    font-size: 12px;
+    transition: transform .15s;
+}
+
+details.details-card[open]>summary::before {
+    transform: rotate(90deg);
+}
+
+details.details-card[open]>summary {
+    margin-bottom: 12px;
 }

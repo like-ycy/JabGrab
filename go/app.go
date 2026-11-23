@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
@@ -59,6 +60,10 @@ type App struct {
 	dlrVer    string
 	dlrVerFor string
 
+	// verMu 只保护版本号探测的去重表。
+	verMu      sync.Mutex
+	verProbing map[string]bool
+
 	// components 管理按需下载的外部组件（清单缓存、安装、卸载）。
 	components *componentService
 	// installMu 只保护下面两个 map，与 a.mu 分开：安装进度每 100ms 更新一次，
@@ -66,6 +71,7 @@ type App struct {
 	installMu       sync.Mutex
 	installs        map[string]bool
 	installProgress map[string][2]int64
+	installCancel   map[string]context.CancelFunc
 }
 
 func NewApp() *App {
@@ -139,7 +145,12 @@ func (a *App) Boot() BootInfo {
 
 	if p, src, err := locate.Dlr(cfg, a.candidates(locate.NameDlr)...); err == nil {
 		info.DlrPath, info.DlrSource = p, src
-		info.DlrVersion = a.dlrVersion(p)
+		// 版本号要起一次子进程（慢盘/杀软扫描时可达数秒），首屏不等它：
+		// 先用缓存，没有就后台探测，完成后经 dlr:version 事件补画。
+		info.DlrVersion = a.cachedDlrVersion(p)
+		if info.DlrVersion == "" {
+			go a.probeDlrVersion(p)
+		}
 	} else {
 		info.Issues = append(info.Issues, err.Error())
 	}
@@ -279,10 +290,8 @@ func (a *App) Start() error {
 	// 提前拦住：ffmpeg 缺失时 dl-re 启动即崩，等用户点开始后再逐条失败体验很差。
 	// 定位链会查组件、随包、PATH 与「下载器同目录」（便携部署的常见摆法）。
 	if dlr, _, err := locate.Dlr(cfg, a.candidates(locate.NameDlr)...); err == nil {
-		if p, _ := locate.FFmpeg(cfg, []string{filepath.Dir(dlr)}, a.candidates(locate.NameFFmpeg)...); p == "" {
-			return errors.New("未找到 ffmpeg：N_m3u8DL-RE 启动时必须校验 ffmpeg，" +
-				"请先安装（macOS 可 brew install ffmpeg；Windows 把 ffmpeg.exe 所在目录加入 PATH，" +
-				"或把 ffmpeg 放到下载器同目录）")
+		if _, _, ferr := locate.RequireFFmpeg(cfg, []string{filepath.Dir(dlr)}, a.candidates(locate.NameFFmpeg)...); ferr != nil {
+			return ferr
 		}
 	}
 
@@ -330,6 +339,14 @@ func (a *App) ClearDownloaded() (pipeline.PruneResult, error) {
 		}
 	}
 
+	// 改写用户文件前先留一份备份（配置目录 txt.bak），误清理还能找回来。
+	// 备份失败不拦清理：它只是保险，不是前置条件。
+	if backup, berr := backupTxt(cfg.TxtPath); berr != nil {
+		a.emit("pipeline:log", LogLine{Level: "warn", Text: "清理前备份 txt 失败（继续清理）: " + berr.Error()})
+	} else if backup != "" {
+		a.emit("pipeline:log", LogLine{Level: "debug", Text: "清理前已备份清单到 " + backup})
+	}
+
 	res, err := pipeline.PruneURLs(cfg.TxtPath, done)
 	if err != nil {
 		// txt 没改成，队列保持原样：让用户看得见哪几条还没处理。
@@ -352,6 +369,56 @@ func (a *App) Stop() {
 	}
 }
 
+// RetryTask 只重跑队列里的一条（失败 / 已取消行的「重试」按钮）。
+func (a *App) RetryTask(idx int) error {
+	a.mu.Lock()
+	runner := a.runner
+	a.mu.Unlock()
+	if runner == nil {
+		return errors.New("应用尚未初始化")
+	}
+	if runner.Running() {
+		return errors.New("任务正在运行，请先停止")
+	}
+	go func() {
+		if err := runner.RunOne(context.Background(), idx); err != nil {
+			a.emit("pipeline:log", LogLine{Level: "error", Text: err.Error()})
+		}
+	}()
+	return nil
+}
+
+// RemoveTask 把一条任务从本轮队列里移除（不动 txt）。
+func (a *App) RemoveTask(idx int) error {
+	a.mu.Lock()
+	runner := a.runner
+	a.mu.Unlock()
+	if runner == nil {
+		return errors.New("应用尚未初始化")
+	}
+	return runner.RemoveItem(idx)
+}
+
+// backupTxt 把 txt 原样复制到配置目录的 txt.bak。
+func backupTxt(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	dir, err := config.Dir()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	p := filepath.Join(dir, "txt.bak")
+	if err := os.WriteFile(p, data, 0o644); err != nil {
+		return "", err
+	}
+	return p, nil
+}
+
 // State 返回当前任务快照，供前端轮询兜底。
 func (a *App) State() pipeline.State {
 	a.mu.Lock()
@@ -370,15 +437,39 @@ func (a *App) GetSystemAppearance() string {
 	return appearance.Get()
 }
 
-// dlrVersion 取下载器版本（带缓存，避免每次刷新都拉一次进程）。
-func (a *App) dlrVersion(bin string) string {
+// dlrVersionDTO 是异步探测完成后补发给前端的版本号。
+type dlrVersionDTO struct {
+	Path    string `json:"path"`
+	Version string `json:"version"`
+}
+
+// cachedDlrVersion 只读缓存，不起进程。
+func (a *App) cachedDlrVersion(bin string) string {
 	a.mu.Lock()
-	if a.dlrVerFor == bin && a.dlrVer != "" {
-		v := a.dlrVer
-		a.mu.Unlock()
-		return v
+	defer a.mu.Unlock()
+	if a.dlrVerFor == bin {
+		return a.dlrVer
 	}
-	a.mu.Unlock()
+	return ""
+}
+
+// probeDlrVersion 后台探测下载器版本（带缓存与去重），完成后推事件给前端。
+func (a *App) probeDlrVersion(bin string) {
+	a.verMu.Lock()
+	if a.verProbing == nil {
+		a.verProbing = map[string]bool{}
+	}
+	if a.verProbing[bin] {
+		a.verMu.Unlock()
+		return
+	}
+	a.verProbing[bin] = true
+	a.verMu.Unlock()
+	defer func() {
+		a.verMu.Lock()
+		delete(a.verProbing, bin)
+		a.verMu.Unlock()
+	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -388,7 +479,7 @@ func (a *App) dlrVersion(bin string) string {
 	cmd.Cancel = func() error { return proc.Kill(cmd) }
 	out, err := cmd.Output()
 	if err != nil {
-		return ""
+		return
 	}
 	v := strings.TrimSpace(strings.SplitN(string(out), "\n", 2)[0])
 	if len(v) > 120 {
@@ -398,7 +489,7 @@ func (a *App) dlrVersion(bin string) string {
 	a.mu.Lock()
 	a.dlrVer, a.dlrVerFor = v, bin
 	a.mu.Unlock()
-	return v
+	a.emit("dlr:version", dlrVersionDTO{Path: bin, Version: v})
 }
 
 func dirOf(p string) string {

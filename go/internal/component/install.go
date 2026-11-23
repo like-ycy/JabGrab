@@ -656,12 +656,11 @@ func writeReceipt(dir string, rc receipt) error {
 //
 // 顺带清掉同名组件的其他版本目录 —— 用户点「移除」的语义是「把这块空间还给我」，
 // 留下几个旧版本目录会让「移除后磁盘没变」变成一个需要解释的现象。
-func (m *Manager) Remove(name string) error {
+func (m *Manager) Remove(ctx context.Context, name string) error {
 	if err := safeSegment("组件名", name); err != nil {
 		return err
 	}
-	// 卸载没有 ctx 参数，不参与取消（它就几步文件操作）。
-	if err := m.lock(context.Background()); err != nil {
+	if err := m.lock(ctx); err != nil {
 		return err
 	}
 	defer m.unlock()
@@ -669,7 +668,7 @@ func (m *Manager) Remove(name string) error {
 	if err := os.MkdirAll(m.root, 0o755); err != nil {
 		return fmt.Errorf("创建组件目录 %s: %w", m.root, err)
 	}
-	release, err := m.acquireLock(context.Background(), installLockWait)
+	release, err := m.acquireLock(ctx, installLockWait)
 	if err != nil {
 		return err
 	}
@@ -731,8 +730,8 @@ func (m *Manager) dropPointer(name string) error {
 //   - 指针不可读时只清半成品，不动版本目录：「哪些目录还有人用」是未知的，
 //     猜错就是把用户刚下好的 20MB 删掉；
 //   - 锁目录本身不参与清理。
-func (m *Manager) CleanupStale() error {
-	if err := m.lock(context.Background()); err != nil {
+func (m *Manager) CleanupStale(ctx context.Context) error {
+	if err := m.lock(ctx); err != nil {
 		return err
 	}
 	defer m.unlock()
@@ -745,7 +744,7 @@ func (m *Manager) CleanupStale() error {
 		return fmt.Errorf("读取组件目录 %s: %w", m.root, err)
 	}
 
-	release, err := m.acquireLock(context.Background(), 0)
+	release, err := m.acquireLock(ctx, 0)
 	if err != nil {
 		log.Printf("另一个实例正在安装组件，本次跳过清理")
 		return nil
@@ -823,8 +822,8 @@ func (m *Manager) ownedDirs(name string) ([]string, error) {
 // 与 State 的分工：State 走的是「便宜且够用」的检查（目录在、可执行文件在、
 // 协议对得上），每次启动都会用；Verify 会把文件清单逐个 stat 一遍（以及逐个
 // 核对符号链接目标），只在用户主动排查与「幂等安装」时用。
-func (m *Manager) Verify(name string) error {
-	if err := m.lock(context.Background()); err != nil {
+func (m *Manager) Verify(ctx context.Context, name string) error {
+	if err := m.lock(ctx); err != nil {
 		return err
 	}
 	defer m.unlock()

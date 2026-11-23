@@ -267,6 +267,21 @@ func FFmpeg(cfg config.Config, near []string, extra ...Candidate) (string, strin
 	return "", ""
 }
 
+// RequireFFmpeg 是「开始任务前」的 ffmpeg 闸门：定位失败时返回可直接展示的错误。
+// 配置路径写错时明确报错（与 Dlr 的口径一致），而不是静默回退让用户猜。
+func RequireFFmpeg(cfg config.Config, near []string, extra ...Candidate) (string, string, error) {
+	if p := strings.TrimSpace(cfg.FFmpegPath); p != "" && !executableFile(p) {
+		return "", "", fmt.Errorf("配置中的 ffmpeg 路径不可执行: %s", p)
+	}
+	p, src := FFmpeg(cfg, near, extra...)
+	if p == "" {
+		return "", "", errors.New("未找到 ffmpeg：N_m3u8DL-RE 启动时必须校验 ffmpeg，" +
+			"请先安装（macOS 可 brew install ffmpeg；Windows 把 ffmpeg.exe 所在目录加入 PATH，" +
+			"或把 ffmpeg 放到下载器同目录）")
+	}
+	return p, src, nil
+}
+
 // workDirFor 若 bin 带路径分隔符且存在，返回其所在目录，
 // 便于程序找到同目录下的依赖资源。
 func workDirFor(bin string) string {

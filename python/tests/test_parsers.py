@@ -198,7 +198,9 @@ class TestBaseScraper:
         assert BaseScraper.extract_group("abc", r"(b)") == "b"
 
     def test_scrape_fetch_failed(self, monkeypatch):
-        monkeypatch.setattr(BaseScraper, "fetch_html", staticmethod(lambda url: ""))
+        monkeypatch.setattr(
+            BaseScraper, "fetch_html", staticmethod(lambda url, ready=None: "")
+        )
         result = JableScraper().scrape("https://example.com")
         assert result.ok is False
         assert result.error == "获取网页源码失败"
@@ -209,7 +211,7 @@ class TestBaseScraper:
                 raise ValueError("boom")
 
         monkeypatch.setattr(
-            BaseScraper, "fetch_html", staticmethod(lambda url: "<html/>")
+            BaseScraper, "fetch_html", staticmethod(lambda url, ready=None: "<html/>")
         )
         result = Boom().scrape("https://example.com")
         assert result.ok is False
@@ -217,7 +219,7 @@ class TestBaseScraper:
 
     def test_scrape_empty_fields(self, monkeypatch):
         monkeypatch.setattr(
-            BaseScraper, "fetch_html", staticmethod(lambda url: "<html/>")
+            BaseScraper, "fetch_html", staticmethod(lambda url, ready=None: "<html/>")
         )
         result = JableScraper().scrape("https://example.com")
         assert result.ok is False
@@ -225,7 +227,7 @@ class TestBaseScraper:
 
     def test_scrape_ok(self, monkeypatch):
         monkeypatch.setattr(
-            BaseScraper, "fetch_html", staticmethod(lambda url: JABLE_HTML)
+            BaseScraper, "fetch_html", staticmethod(lambda url, ready=None: JABLE_HTML)
         )
         result = JableScraper().scrape("https://example.com")
         assert result.ok is True
@@ -235,7 +237,9 @@ class TestBaseScraper:
 
     def test_scrape_carries_actors(self, monkeypatch):
         monkeypatch.setattr(
-            BaseScraper, "fetch_html", staticmethod(lambda url: JABLE_HTML_WITH_ACTORS)
+            BaseScraper,
+            "fetch_html",
+            staticmethod(lambda url, ready=None: JABLE_HTML_WITH_ACTORS),
         )
         result = JableScraper().scrape("https://example.com")
         assert result.ok is True
@@ -249,7 +253,7 @@ class TestBaseScraper:
                 raise ValueError("boom")
 
         monkeypatch.setattr(
-            BaseScraper, "fetch_html", staticmethod(lambda url: JABLE_HTML)
+            BaseScraper, "fetch_html", staticmethod(lambda url, ready=None: JABLE_HTML)
         )
         result = Boom().scrape("https://example.com")
         assert result.ok is True
@@ -312,15 +316,13 @@ class TestFetchHtmlStdoutIsolation:
 
 
 class TestFetchHtmlTiming:
-    def test_waits_10s_before_captcha_and_5s_after(self, monkeypatch):
-        """打开页面先等 10 秒过 CF 验证，解题后再等 5 秒等 DOM 渲染。"""
-        from jab_scrape import scraper as mod
+    """条件轮询：就绪即走，不再死等固定秒数；超时才解题再等第二轮。"""
 
-        calls = []
-
+    @staticmethod
+    def _fake_sb(calls, sources, captcha=None):
         class FakeSB:
             def __init__(self, **kwargs):
-                pass
+                self._i = 0
 
             def __enter__(self):
                 return self
@@ -336,48 +338,142 @@ class TestFetchHtmlTiming:
 
             def solve_captcha(self):
                 calls.append(("captcha", None))
+                if captcha is not None:
+                    captcha()
 
             def get_page_source(self):
-                return "<html/>"
+                i = min(self._i, len(sources) - 1)
+                self._i += 1
+                return sources[i]
 
+        return FakeSB
+
+    def test_ready_page_skips_captcha_and_extra_wait(self, monkeypatch):
+        """页面一打开就就绪：不解题、不 sleep，直接拿源码走人。"""
+        from jab_scrape import scraper as mod
+
+        calls = []
+        FakeSB = self._fake_sb(calls, [JABLE_HTML])
         monkeypatch.setattr(mod, "SB", FakeSB)
-        mod.BaseScraper.fetch_html("https://example.com")
+        html = mod.BaseScraper.fetch_html(
+            "https://example.com", ready=JableScraper().page_ready
+        )
+        assert html == JABLE_HTML
+        assert calls == [("open", "https://example.com")]
 
+    def test_polls_until_ready(self, monkeypatch):
+        """挑战页要轮询到真页面出现为止，期间按固定间隔小睡。"""
+        from jab_scrape import scraper as mod
+
+        calls = []
+        FakeSB = self._fake_sb(calls, ["<html>challenge</html>"] * 3 + [JABLE_HTML])
+        monkeypatch.setattr(mod, "SB", FakeSB)
+        html = mod.BaseScraper.fetch_html(
+            "https://example.com", ready=JableScraper().page_ready
+        )
+        assert html == JABLE_HTML
         assert calls == [
             ("open", "https://example.com"),
-            ("sleep", 10),
-            ("captcha", None),
-            ("sleep", 5),
+            ("sleep", mod.POLL_INTERVAL_SEC),
+            ("sleep", mod.POLL_INTERVAL_SEC),
+            ("sleep", mod.POLL_INTERVAL_SEC),
         ]
+
+    def test_captcha_only_after_first_window_exhausted(self, monkeypatch):
+        """第一轮等满上限仍不就绪才解题；解题后就绪立刻返回。"""
+        from jab_scrape import scraper as mod
+
+        calls = []
+        state = {"solved": False}
+
+        def solve():
+            state["solved"] = True
+
+        class FakeSB(self._fake_sb(calls, [], captcha=solve)):
+            def get_page_source(self):
+                return JABLE_HTML if state["solved"] else "<html>challenge</html>"
+
+        monkeypatch.setattr(mod, "SB", FakeSB)
+        html = mod.BaseScraper.fetch_html(
+            "https://example.com", ready=JableScraper().page_ready
+        )
+        assert html == JABLE_HTML
+        first_round_sleeps = int(mod.PAGE_WAIT_MAX_SEC / mod.POLL_INTERVAL_SEC)
+        assert calls == (
+            [("open", "https://example.com")]
+            + [("sleep", mod.POLL_INTERVAL_SEC)] * first_round_sleeps
+            + [("captcha", None)]
+        )
+
+    def test_gives_up_after_both_windows(self, monkeypatch):
+        """两轮都等满仍不就绪：把最后的源码交出去，由解析层报清晰错误。"""
+        from jab_scrape import scraper as mod
+
+        calls = []
+        FakeSB = self._fake_sb(calls, ["<html>challenge</html>"])
+        monkeypatch.setattr(mod, "SB", FakeSB)
+        html = mod.BaseScraper.fetch_html(
+            "https://example.com", ready=JableScraper().page_ready
+        )
+        assert html == "<html>challenge</html>"
+        total = int(
+            (mod.PAGE_WAIT_MAX_SEC + mod.CAPTCHA_WAIT_MAX_SEC) / mod.POLL_INTERVAL_SEC
+        )
+        assert calls.count(("sleep", mod.POLL_INTERVAL_SEC)) == total
+        assert calls.count(("captcha", None)) == 1
 
     def test_captcha_error_is_tolerated(self, monkeypatch):
         """没有验证码时个别版本 solve_captcha 会抛错，不能因此拿不到源码。"""
         from jab_scrape import scraper as mod
 
-        class FakeSB:
-            def __init__(self, **kwargs):
-                pass
+        calls = []
+        state = {"tried": False}
 
-            def __enter__(self):
-                return self
+        def boom():
+            state["tried"] = True
+            raise RuntimeError("no captcha")
 
-            def __exit__(self, *exc):
-                return False
-
-            def activate_cdp_mode(self, url):
-                pass
-
-            def sleep(self, seconds):
-                pass
-
-            def solve_captcha(self):
-                raise RuntimeError("no captcha")
-
+        class FakeSB(self._fake_sb(calls, [], captcha=boom)):
             def get_page_source(self):
-                return "<html>ok</html>"
+                return JABLE_HTML if state["tried"] else "<html>challenge</html>"
 
         monkeypatch.setattr(mod, "SB", FakeSB)
-        assert mod.BaseScraper.fetch_html("https://example.com") == "<html>ok</html>"
+        assert (
+            mod.BaseScraper.fetch_html(
+                "https://example.com", ready=JableScraper().page_ready
+            )
+            == JABLE_HTML
+        )
+
+
+class TestPageReady:
+    def test_ready_on_parseable_page(self):
+        assert JableScraper().page_ready(JABLE_HTML) is True
+
+    def test_not_ready_on_challenge_page(self):
+        assert JableScraper().page_ready("<html>challenge</html>") is False
+        assert JableScraper().page_ready("") is False
+
+    def test_extract_error_means_not_ready(self):
+        class Boom(JableScraper):
+            def extract(self, html):
+                raise ValueError("boom")
+
+        assert Boom().page_ready(JABLE_HTML) is False
+
+
+class TestScrapeErrorPropagation:
+    def test_fetch_exception_carries_class_and_message(self, monkeypatch):
+        """浏览器/驱动炸了时，错误里要能看到异常类名，而不是只有一句「失败」。"""
+
+        def boom(url, ready=None):
+            raise RuntimeError("driver crashed")
+
+        monkeypatch.setattr(BaseScraper, "fetch_html", staticmethod(boom))
+        result = JableScraper().scrape("https://example.com")
+        assert result.ok is False
+        assert "RuntimeError" in result.error
+        assert "driver crashed" in result.error
 
 
 @pytest.mark.parametrize("source", ["jable", "missav"])

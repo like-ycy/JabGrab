@@ -184,10 +184,42 @@ func Save(cfg Config) (Config, error) {
 	if err != nil {
 		return cfg, fmt.Errorf("序列化配置失败: %w", err)
 	}
-	if err := os.WriteFile(p, append(data, '\n'), 0o644); err != nil {
+	if err := writeFileAtomic(p, append(data, '\n')); err != nil {
 		return cfg, fmt.Errorf("写入配置失败: %w", err)
 	}
 	return cfg, nil
+}
+
+// writeFileAtomic 先写同目录临时文件再改名：直接 WriteFile 时崩溃/断电可能
+// 留下半截 JSON，而 startup 对损坏配置的策略是「用默认值运行」，用户会静默
+// 丢失全部设置。
+func writeFileAtomic(p string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(p), ".jabgrab-config-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	discard := func() {
+		tmp.Close()
+		os.Remove(name)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		discard()
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		discard()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(name)
+		return err
+	}
+	if err := os.Rename(name, p); err != nil {
+		os.Remove(name)
+		return err
+	}
+	return nil
 }
 
 // normalize 给缺失/非法的字段补默认值，避免旧配置少字段时行为突变。

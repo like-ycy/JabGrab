@@ -5,6 +5,7 @@ package pipeline
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -78,6 +79,13 @@ type Runner struct {
 	state   State
 	cancel  context.CancelFunc
 	running bool
+	// fileIndex 是一轮开始时建的「文件名 → 路径」索引，
+	// 免得每条任务都扫一遍全部演员目录。本轮新落盘的成品要补进去。
+	fileIndex map[string]string
+
+	// emitMu 只保护进度节流定时器，与 mu 分开：不能持状态锁等定时器。
+	emitMu      sync.Mutex
+	pendingEmit *time.Timer
 }
 
 // New 创建 Runner。
@@ -121,6 +129,7 @@ func (r *Runner) Reset() error {
 	st := cloneState(r.state)
 	r.mu.Unlock()
 
+	r.stopPendingEmit()
 	r.emitState(st)
 	return nil
 }
@@ -156,6 +165,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		st := cloneState(r.state)
 		r.mu.Unlock()
 		cancel()
+		r.stopPendingEmit()
 		r.emitState(st)
 	}()
 
@@ -176,33 +186,25 @@ func (r *Runner) Run(ctx context.Context) error {
 		return nil
 	}
 
-	dlrPath, dlrSource, dlrErr := locate.Dlr(cfg, locate.From(r.hooks.Resolve, locate.NameDlr)...)
-	if dlrErr != nil {
-		return dlrErr
+	t, err := r.resolveTools(cfg)
+	if err != nil {
+		return err
 	}
-	// ffmpeg 是 dl-re 的启动期硬依赖：缺了它连下载都不开始（不是只影响混流）。
-	// 定位链里既认组件/随包，也认 PATH 与下载器同目录（便携部署的常见摆法），
-	// 否则会误拒一个其实可用的环境。
-	ffmpegPath, ffmpegSource := locate.FFmpeg(cfg, []string{filepath.Dir(dlrPath)},
-		locate.From(r.hooks.Resolve, locate.NameFFmpeg)...)
-	if ffmpegPath == "" {
-		return errors.New("未找到 ffmpeg：N_m3u8DL-RE 启动时必须校验 ffmpeg，" +
-			"请安装后重试，或把 ffmpeg 放到下载器同目录")
-	}
-	scrapeArgv, scrapeDir, scrapeSource, scrapeErr := locate.ScrapeSource(cfg,
-		locate.From(r.hooks.Resolve, locate.NameScraper)...)
-	if scrapeErr != nil {
-		return scrapeErr
-	}
-	r.logf("info", fmt.Sprintf("下载器: %s（%s）", dlrPath, dlrSource))
-	r.logf("info", fmt.Sprintf("爬取命令: %s（%s）", strings.Join(scrapeArgv, " "), scrapeSource))
-	r.logf("info", fmt.Sprintf("ffmpeg: %s（%s）", ffmpegPath, ffmpegSource))
 
-	scr := scraper.Scraper{
-		Argv:    scrapeArgv,
-		Dir:     scrapeDir,
-		Timeout: seconds(cfg.ScrapeTimeoutSec),
-		Log:     func(line string) { r.logf("debug", line) },
+	r.mu.Lock()
+	r.fileIndex = buildFileIndex(cfg.SaveDir)
+	r.mu.Unlock()
+
+	// 预取深度 1：下载第 N 条时爬第 N+1 条，把开浏览器 + 等页面的时间藏进下载里。
+	// m3u8 地址有时效，不能预取更深；停止时 runCtx 会把两个进程组一起杀掉。
+	var pending <-chan scrapeOutcome
+	startPrefetch := func(i int) <-chan scrapeOutcome {
+		ch := make(chan scrapeOutcome, 1)
+		go func() {
+			res, err := r.scrapePhase(runCtx, t.scr, i)
+			ch <- scrapeOutcome{res: res, err: err}
+		}()
+		return ch
 	}
 
 	for i := range items {
@@ -212,8 +214,17 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 		r.updateIndex(i + 1)
 
-		if err := r.process(runCtx, cfg, dlrPath, ffmpegPath, scr, i); err != nil {
-			if errors.Is(err, context.Canceled) {
+		var res scraper.Result
+		var serr error
+		if pending != nil {
+			o := <-pending
+			pending = nil
+			res, serr = o.res, o.err
+		} else {
+			res, serr = r.scrapePhase(runCtx, t.scr, i)
+		}
+		if serr != nil {
+			if errors.Is(serr, context.Canceled) {
 				r.patch(i, func(it *Item) {
 					it.Status = StatusCancelled
 					it.Message = "已取消"
@@ -223,9 +234,30 @@ func (r *Runner) Run(ctx context.Context) error {
 			}
 			r.patch(i, func(it *Item) {
 				it.Status = StatusFailed
-				it.Message = err.Error()
+				it.Message = serr.Error()
 			})
-			r.logf("error", fmt.Sprintf("[%d/%d] %s 失败: %v", i+1, len(items), items[i].URL, err))
+			r.logf("error", fmt.Sprintf("[%d/%d] %s 失败: %v", i+1, len(items), items[i].URL, serr))
+			continue
+		}
+
+		if i+1 < len(items) && runCtx.Err() == nil {
+			pending = startPrefetch(i+1)
+		}
+
+		if derr := r.downloadPhase(runCtx, cfg, t, i, res); derr != nil {
+			if errors.Is(derr, context.Canceled) {
+				r.patch(i, func(it *Item) {
+					it.Status = StatusCancelled
+					it.Message = "已取消"
+				})
+				r.markRemaining(i+1, StatusCancelled, "已取消")
+				break
+			}
+			r.patch(i, func(it *Item) {
+				it.Status = StatusFailed
+				it.Message = derr.Error()
+			})
+			r.logf("error", fmt.Sprintf("[%d/%d] %s 失败: %v", i+1, len(items), items[i].URL, derr))
 		}
 	}
 
@@ -233,10 +265,54 @@ func (r *Runner) Run(ctx context.Context) error {
 	return nil
 }
 
-// process 处理单条：爬取 → 跳过判断 → 下载。
-func (r *Runner) process(
-	ctx context.Context, cfg config.Config, dlrPath, ffmpegPath string, scr scraper.Scraper, idx int,
-) error {
+// tools 是一轮运行解析好的三件套（ffmpeg 路径 + 下载器 + 爬取器）。
+type tools struct {
+	dlrPath    string
+	ffmpegPath string
+	scr        scraper.Scraper
+}
+
+// resolveTools 走定位链解析三件套并写日志。Run 与单条重试共用。
+func (r *Runner) resolveTools(cfg config.Config) (tools, error) {
+	dlrPath, dlrSource, err := locate.Dlr(cfg, locate.From(r.hooks.Resolve, locate.NameDlr)...)
+	if err != nil {
+		return tools{}, err
+	}
+	// ffmpeg 是 dl-re 的启动期硬依赖：缺了它连下载都不开始（不是只影响混流）。
+	ffmpegPath, ffmpegSource, err := locate.RequireFFmpeg(cfg, []string{filepath.Dir(dlrPath)},
+		locate.From(r.hooks.Resolve, locate.NameFFmpeg)...)
+	if err != nil {
+		return tools{}, err
+	}
+	scrapeArgv, scrapeDir, scrapeSource, err := locate.ScrapeSource(cfg,
+		locate.From(r.hooks.Resolve, locate.NameScraper)...)
+	if err != nil {
+		return tools{}, err
+	}
+	r.logf("info", fmt.Sprintf("下载器: %s（%s）", dlrPath, dlrSource))
+	r.logf("info", fmt.Sprintf("爬取命令: %s（%s）", strings.Join(scrapeArgv, " "), scrapeSource))
+	r.logf("info", fmt.Sprintf("ffmpeg: %s（%s）", ffmpegPath, ffmpegSource))
+
+	return tools{
+		dlrPath:    dlrPath,
+		ffmpegPath: ffmpegPath,
+		scr: scraper.Scraper{
+			Argv:    scrapeArgv,
+			Dir:     scrapeDir,
+			Timeout: seconds(cfg.ScrapeTimeoutSec),
+			Log:     func(line string) { r.logf("debug", line) },
+		},
+	}, nil
+}
+
+// scrapeOutcome 是预取协程回传的结果。
+type scrapeOutcome struct {
+	res scraper.Result
+	err error
+}
+
+// scrapePhase 爬取单条并把演员 / 视频名落到任务项上。
+func (r *Runner) scrapePhase(ctx context.Context, scr scraper.Scraper, idx int) (scraper.Result, error) {
 	item := r.item(idx)
 	total := r.total()
 
@@ -248,14 +324,14 @@ func (r *Runner) process(
 
 	res, err := scr.Scrape(ctx, item.URL, item.Site)
 	if err != nil {
-		return err
+		return res, err
 	}
 	if !res.OK {
 		msg := res.Error
 		if msg == "" {
 			msg = "爬取失败"
 		}
-		return errors.New(msg)
+		return res, errors.New(msg)
 	}
 
 	// 演员名先落到任务项上：即使后面因为取不到视频名而失败，
@@ -268,9 +344,18 @@ func (r *Runner) process(
 
 	name := downloader.SafeName(res.VideoName)
 	if name == "" {
-		return errors.New("爬取结果没有视频名")
+		return res, errors.New("爬取结果没有视频名")
 	}
 	r.patch(idx, func(it *Item) { it.Name = name; it.Message = "已拿到 m3u8" })
+	return res, nil
+}
+
+// downloadPhase 跳过判断 → 下载 → 旧档清理 → 回填成品路径。
+func (r *Runner) downloadPhase(
+	ctx context.Context, cfg config.Config, t tools, idx int, res scraper.Result,
+) error {
+	total := r.total()
+	name := downloader.SafeName(res.VideoName)
 
 	// 有演员名就归档到「保存目录/演员名」下（多个演员用横线连接）；
 	// 取不到演员名（missav、或页面上没有演员信息）时直接放保存目录根，
@@ -285,10 +370,8 @@ func (r *Runner) process(
 	// 下载前先看本地有没有这部片子的成品。结论对用户是要紧的（为什么没下载），
 	// 所以命中与未命中都写日志：只在跳过时打一行的话，日志里看不出检查到底做没做，
 	// 也看不出命中的是普通版还是中文字幕版。
-	if exists := findExistingVersion(cfg.SaveDir, saveDir, name); exists != "" {
-		// 跳过时不做任何删除：这里的「已存在」只按文件名和大小判断，
-		// 上次下载中断留下的非空残件也算存在。此时若删普通版，可能把完整的
-		// 那份删掉、只剩残件。删除只在本次真的下完中文字幕版之后做。
+	if exists := r.findExistingVersion(cfg.SaveDir, saveDir, name); exists != "" {
+		// 跳过时不做任何删除：删除只在本次真的下完中文字幕版之后做。
 		r.patch(idx, func(it *Item) {
 			it.Status = StatusSkipped
 			it.Message = "已存在: " + filepath.Base(exists)
@@ -306,8 +389,15 @@ func (r *Runner) process(
 	})
 	r.logf("info", fmt.Sprintf("[%d/%d] 下载 %s → %s", idx+1, total, name, res.M3U8URL))
 
+	// 先落「下载中」标记再启动：中断后标记还在，同名非空文件就会被判为残件
+	// 而不是成品（见 completedVideo）。写失败只降级为旧行为，不拦下载。
+	marker := partMarkerPath(saveDir, name)
+	if err := os.WriteFile(marker, []byte(res.M3U8URL), 0o644); err != nil {
+		r.logf("warn", fmt.Sprintf("[%d/%d] 写入下载标记失败（不影响下载）: %v", idx+1, total, err))
+	}
+
 	opts := downloader.Options{
-		Bin:        dlrPath,
+		Bin:        t.dlrPath,
 		SaveDir:    saveDir,
 		SaveName:   name,
 		Threads:    cfg.Download.Threads,
@@ -315,13 +405,13 @@ func (r *Runner) process(
 		TimeoutSec: cfg.Download.TimeoutSec,
 		MaxSpeed:   cfg.Download.MaxSpeed,
 		MuxToMP4:   cfg.Download.MuxToMP4,
-		FFmpegPath: ffmpegPath,
+		FFmpegPath: t.ffmpegPath,
 		Headers:    res.Headers,
 	}
 
-	err = opts.Run(ctx, res.M3U8URL,
+	err := opts.Run(ctx, res.M3U8URL,
 		func(p downloader.Progress) {
-			r.patch(idx, func(it *Item) {
+			r.patchProgress(idx, func(it *Item) {
 				it.Percent = p.Percent
 				it.Speed = p.Speed
 				it.ETA = p.ETA
@@ -346,10 +436,22 @@ func (r *Runner) process(
 	// 所以按目录实际存在的文件找，而不是拼一个假想的 .mp4。
 	outPath := existingVideo(saveDir, name)
 	if outPath == "" {
-		outPath = findExisting(cfg.SaveDir, saveDir, name)
+		outPath = r.findExistingIndexed(cfg.SaveDir, saveDir, name)
 	}
 	if outPath == "" {
 		r.logf("debug", fmt.Sprintf("[%d/%d] 下载已结束，但在 %s 下没找到成品文件", idx+1, total, saveDir))
+	}
+
+	// 下载真的完成了才摘标记、写完成记录：此后同名文件按记录校验大小，
+	// 中断残件（标记还在、没有记录）不会再被误判成「已存在」。
+	_ = os.Remove(marker)
+	if outPath != "" {
+		r.recordDone(outPath, r.item(idx).URL)
+		r.mu.Lock()
+		if r.fileIndex != nil {
+			r.fileIndex[filepath.Base(outPath)] = outPath
+		}
+		r.mu.Unlock()
 	}
 
 	r.patch(idx, func(it *Item) {
@@ -364,6 +466,90 @@ func (r *Runner) process(
 	return nil
 }
 
+// RunOne 只重跑队列里的一条（失败 / 已取消行的「重试」按钮），不动其它行。
+func (r *Runner) RunOne(ctx context.Context, idx int) error {
+	r.mu.Lock()
+	if r.running {
+		r.mu.Unlock()
+		return errors.New("任务正在运行，请先停止")
+	}
+	if idx < 0 || idx >= len(r.state.Items) {
+		r.mu.Unlock()
+		return errors.New("任务不存在")
+	}
+	cfg := r.cfg
+	runCtx, cancel := context.WithCancel(ctx)
+	r.cancel = cancel
+	r.running = true
+	r.state.Running = true
+	r.state.Index = idx + 1
+	r.state.Items[idx].Status = StatusPending
+	r.state.Items[idx].Message = ""
+	r.state.Items[idx].Percent = 0
+	r.state.Items[idx].Speed = ""
+	r.state.Items[idx].ETA = ""
+	st := cloneState(r.state)
+	r.mu.Unlock()
+	r.emitState(st)
+
+	defer func() {
+		r.mu.Lock()
+		r.running = false
+		r.cancel = nil
+		r.state.Running = false
+		st := cloneState(r.state)
+		r.mu.Unlock()
+		cancel()
+		r.stopPendingEmit()
+		r.emitState(st)
+	}()
+
+	r.mu.Lock()
+	r.fileIndex = buildFileIndex(cfg.SaveDir)
+	r.mu.Unlock()
+
+	t, err := r.resolveTools(cfg)
+	if err != nil {
+		r.patch(idx, func(it *Item) { it.Status = StatusFailed; it.Message = err.Error() })
+		return err
+	}
+	res, err := r.scrapePhase(runCtx, t.scr, idx)
+	if err == nil {
+		err = r.downloadPhase(runCtx, cfg, t, idx, res)
+	}
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			r.patch(idx, func(it *Item) { it.Status = StatusCancelled; it.Message = "已取消" })
+		} else {
+			r.patch(idx, func(it *Item) { it.Status = StatusFailed; it.Message = err.Error() })
+			r.logf("error", fmt.Sprintf("重试第 %d 条失败: %v", idx+1, err))
+		}
+	}
+	return nil
+}
+
+// RemoveItem 把一条任务从本轮队列里移除（不动 txt）。运行中不允许。
+func (r *Runner) RemoveItem(idx int) error {
+	r.mu.Lock()
+	if r.running {
+		r.mu.Unlock()
+		return errors.New("任务正在运行，请先停止")
+	}
+	if idx < 0 || idx >= len(r.state.Items) {
+		r.mu.Unlock()
+		return errors.New("任务不存在")
+	}
+	r.state.Items = append(r.state.Items[:idx], r.state.Items[idx+1:]...)
+	r.state.Total = len(r.state.Items)
+	if r.state.Index > r.state.Total {
+		r.state.Index = r.state.Total
+	}
+	st := cloneState(r.state)
+	r.mu.Unlock()
+	r.emitState(st)
+	return nil
+}
+
 // dropPlainVideo 删除与中文字幕版同名的普通版旧文件。
 //
 // 两道门槛，都是为了不把好文件删掉：
@@ -373,7 +559,7 @@ func (r *Runner) process(
 // 三种结局都写日志（删了 / 没有旧档 / 因为残件保留），日志窗口里要能看出这一步
 // 确实跑过，而不是「没打印 = 没执行」。
 func (r *Runner) dropPlainVideo(pos, total int, root, saveDir, plain string) {
-	plainPath := findExisting(root, saveDir, plain)
+	plainPath := r.findExistingIndexed(root, saveDir, plain)
 	if plainPath == "" {
 		// 从没下过普通版是常态，仍留一行：否则用户无法判断清理有没有执行。
 		r.logf("info", fmt.Sprintf("[%d/%d] 没有同名的非中文字幕旧档需要清理", pos, total))
@@ -381,7 +567,7 @@ func (r *Runner) dropPlainVideo(pos, total int, root, saveDir, plain string) {
 	}
 	subPath := existingVideo(saveDir, plain+chineseSubSuffix)
 	if subPath == "" {
-		subPath = findExisting(root, saveDir, plain+chineseSubSuffix)
+		subPath = r.findExistingIndexed(root, saveDir, plain+chineseSubSuffix)
 	}
 	if subPath == "" {
 		r.logf("warn", fmt.Sprintf(
@@ -492,13 +678,76 @@ func buildItems(cfg config.Config, urls []string) []Item {
 
 // findExistingVersion 按「本地已有的可接受版本」查成品：
 // 普通版链接在中文字幕版已存在时也算下过，中文字幕版则只认自己。
-func findExistingVersion(root, saveDir, name string) string {
+func (r *Runner) findExistingVersion(root, saveDir, name string) string {
 	for _, n := range nameCandidates(name) {
-		if p := findExisting(root, saveDir, n); p != "" {
+		if p := r.findExistingIndexed(root, saveDir, n); p != "" {
 			return p
 		}
 	}
 	return ""
+}
+
+// findExistingIndexed 与 findExisting 同语义，但一级子目录部分查本轮索引，
+// 不再每条任务都 ReadDir 全部演员目录。目标目录与根目录仍实时 stat：
+// 本轮刚写进去的文件不在索引里。
+func (r *Runner) findExistingIndexed(root, targetDir, name string) string {
+	if p := existingVideo(targetDir, name); p != "" {
+		return p
+	}
+	if targetDir != root {
+		if p := existingVideo(root, name); p != "" {
+			return p
+		}
+	}
+	r.mu.Lock()
+	var cand string
+	for _, ext := range videoExts {
+		if p := r.fileIndex[name+ext]; p != "" {
+			cand = p
+			break
+		}
+	}
+	r.mu.Unlock()
+	if cand != "" {
+		if st, err := os.Stat(cand); err == nil && !st.IsDir() && st.Size() > 0 && completedVideo(cand, st.Size()) {
+			return cand
+		}
+	}
+	return ""
+}
+
+// buildFileIndex 扫保存目录根与一级子目录，建「视频文件名 → 路径」索引。
+// 根目录先入表，同名时根目录优先（与 findExisting 的查找顺序一致）。
+func buildFileIndex(root string) map[string]string {
+	idx := make(map[string]string)
+	addDir := func(dir string) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			for _, ext := range videoExts {
+				if strings.HasSuffix(e.Name(), ext) {
+					if _, ok := idx[e.Name()]; !ok {
+						idx[e.Name()] = filepath.Join(dir, e.Name())
+					}
+					break
+				}
+			}
+		}
+	}
+	addDir(root)
+	if entries, err := os.ReadDir(root); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				addDir(filepath.Join(root, e.Name()))
+			}
+		}
+	}
+	return idx
 }
 
 // findExisting 找已经下好的同名成品文件：先看本次要写入的目录，
@@ -534,14 +783,66 @@ func findExisting(root, targetDir, name string) string {
 }
 
 // existingVideo 检查保存目录下是否已有同名成品文件。
+// 非空只是必要条件，还要过 completedVideo 的残件判定。
 func existingVideo(dir, name string) string {
 	for _, ext := range videoExts {
 		p := filepath.Join(dir, name+ext)
-		if st, err := os.Stat(p); err == nil && !st.IsDir() && st.Size() > 0 {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() && st.Size() > 0 && completedVideo(p, st.Size()) {
 			return p
 		}
 	}
 	return ""
+}
+
+// partMarkerPath 是「下载中」标记：下载开始前写入，完成后摘除。
+// 标记还在就说明上次中断了，此时的同名非空文件只能是残件。
+func partMarkerPath(dir, name string) string {
+	return filepath.Join(dir, "."+name+".jabgrab-part")
+}
+
+// doneRecordPath 是成品旁的完成记录（隐藏文件），记下完成时的大小。
+func doneRecordPath(videoPath string) string {
+	return filepath.Join(filepath.Dir(videoPath), "."+filepath.Base(videoPath)+".jabgrab-done")
+}
+
+type doneRecord struct {
+	URL  string `json:"url"`
+	Size int64  `json:"size"`
+	At   string `json:"at"`
+}
+
+// recordDone 写完成记录。失败只影响残件判定的精度，不影响成品本身。
+func (r *Runner) recordDone(videoPath, url string) {
+	st, err := os.Stat(videoPath)
+	if err != nil {
+		return
+	}
+	data, err := json.Marshal(doneRecord{URL: url, Size: st.Size(), At: time.Now().Format(time.RFC3339)})
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(doneRecordPath(videoPath), data, 0o644); err != nil {
+		r.logf("warn", "写入完成记录失败（不影响成品）: "+err.Error())
+	}
+}
+
+// completedVideo 判断一个非空文件是不是完整成品：
+//   - 有完成记录：大小一致才算（记录之后文件又变了 = 残件）；
+//   - 没有记录但有下载标记：上次下载中断，残件；
+//   - 两者都没有：引入记录机制之前的旧成品，沿用旧行为信任它。
+func completedVideo(p string, size int64) bool {
+	if data, err := os.ReadFile(doneRecordPath(p)); err == nil {
+		var rec doneRecord
+		if json.Unmarshal(data, &rec) == nil {
+			return rec.Size == size
+		}
+		return false
+	}
+	base := strings.TrimSuffix(filepath.Base(p), filepath.Ext(p))
+	if _, err := os.Stat(partMarkerPath(filepath.Dir(p), base)); err == nil {
+		return false
+	}
+	return true
 }
 
 // absPath 尽量把成品路径转成绝对路径。
@@ -659,6 +960,9 @@ func removePlainVideo(root, saveDir, plain string) ([]string, error) {
 				}
 				continue
 			}
+			// 完成记录与下载标记跟着成品走，留着会干扰下一次的残件判定。
+			_ = os.Remove(doneRecordPath(p))
+			_ = os.Remove(partMarkerPath(dir, plain))
 			removed = append(removed, p)
 		}
 	}
@@ -680,17 +984,47 @@ func (r *Runner) total() int {
 	return r.state.Total
 }
 
-// patch 修改单条并推送状态。
+// patch 修改单条并立即推送（状态跃迁用）。
 func (r *Runner) patch(idx int, fn func(*Item)) {
+	r.applyPatch(idx, fn)
+	r.stopPendingEmit()
+	r.emitState(r.Snapshot())
+}
+
+// patchProgress 供高频进度帧使用：状态立即写入，推送合并节流。
+// 否则每一帧都「深拷贝全量快照 → JSON 序列化 → 前端整表重建」，
+// 列表一大就是 O(任务数 × 帧率) 的放大链路。
+func (r *Runner) patchProgress(idx int, fn func(*Item)) {
+	r.applyPatch(idx, fn)
+	r.emitMu.Lock()
+	defer r.emitMu.Unlock()
+	if r.pendingEmit != nil {
+		return
+	}
+	r.pendingEmit = time.AfterFunc(150*time.Millisecond, func() {
+		r.emitMu.Lock()
+		r.pendingEmit = nil
+		r.emitMu.Unlock()
+		r.emitState(r.Snapshot())
+	})
+}
+
+func (r *Runner) applyPatch(idx int, fn func(*Item)) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	if idx < 0 || idx >= len(r.state.Items) {
-		r.mu.Unlock()
 		return
 	}
 	fn(&r.state.Items[idx])
-	st := cloneState(r.state)
-	r.mu.Unlock()
-	r.emitState(st)
+}
+
+func (r *Runner) stopPendingEmit() {
+	r.emitMu.Lock()
+	defer r.emitMu.Unlock()
+	if r.pendingEmit != nil {
+		r.pendingEmit.Stop()
+		r.pendingEmit = nil
+	}
 }
 
 func (r *Runner) updateIndex(idx int) {
@@ -698,6 +1032,7 @@ func (r *Runner) updateIndex(idx int) {
 	r.state.Index = idx
 	st := cloneState(r.state)
 	r.mu.Unlock()
+	r.stopPendingEmit()
 	r.emitState(st)
 }
 
@@ -713,6 +1048,7 @@ func (r *Runner) markRemaining(from int, status Status, msg string) {
 	}
 	st := cloneState(r.state)
 	r.mu.Unlock()
+	r.stopPendingEmit()
 	r.emitState(st)
 }
 

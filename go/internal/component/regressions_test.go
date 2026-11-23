@@ -101,7 +101,7 @@ func TestInstallRepairsMissingFile(t *testing.T) {
 	if _, err := os.Stat(dylib); err != nil {
 		t.Fatalf("重装后附属文件仍未恢复: %v", err)
 	}
-	if err := m.Verify("scraper"); err != nil {
+	if err := m.Verify(context.Background(), "scraper"); err != nil {
 		t.Fatalf("重装后完整性仍不通过: %v", err)
 	}
 }
@@ -124,13 +124,13 @@ func TestVerifyDetectsMissingSymlink(t *testing.T) {
 	spec, _ := serve(t, payload)
 	mustInstall(t, m, spec)
 
-	if err := m.Verify("scraper"); err != nil {
+	if err := m.Verify(context.Background(), "scraper"); err != nil {
 		t.Fatalf("刚装好的组件不应报错：%v", err)
 	}
 	if err := os.Remove(filepath.Join(root, "scraper-0.4.3", "lib.dylib")); err != nil {
 		t.Fatalf("删除符号链接: %v", err)
 	}
-	if err := m.Verify("scraper"); err == nil {
+	if err := m.Verify(context.Background(), "scraper"); err == nil {
 		t.Fatal("符号链接被删却校验通过")
 	}
 }
@@ -155,7 +155,7 @@ func TestRemoveKeepsSiblingComponent(t *testing.T) {
 	addonSpec.Binary = "addon"
 	mustInstall(t, m, addonSpec)
 
-	if err := m.Remove("scraper"); err != nil {
+	if err := m.Remove(context.Background(), "scraper"); err != nil {
 		t.Fatalf("移除失败: %v", err)
 	}
 	if got := m.State(addonSpec); got != Ready {
@@ -212,7 +212,7 @@ func TestCleanupStaleSkipsWhileAnotherInstanceInstalling(t *testing.T) {
 
 	// 另一个实例在安装进行中做启动清理。
 	other := New(root)
-	if err := other.CleanupStale(); err != nil {
+	if err := other.CleanupStale(context.Background()); err != nil {
 		t.Fatalf("清理不该报错（拿不到锁时应跳过）：%v", err)
 	}
 
@@ -281,7 +281,7 @@ func TestStateDetectsMissingExecBit(t *testing.T) {
 	if got := m.State(spec); got != Corrupt {
 		t.Fatalf("可执行位丢失应为 Corrupt，实际 %s", got)
 	}
-	if err := m.Verify("scraper"); err == nil {
+	if err := m.Verify(context.Background(), "scraper"); err == nil {
 		t.Fatal("可执行位丢失却校验通过")
 	}
 
@@ -630,7 +630,7 @@ func TestRemoveKeepsPointerWhenActiveDirUndeletable(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(active, 0o755) })
 
-	if err := m.Remove(spec.Name); err == nil {
+	if err := m.Remove(context.Background(), spec.Name); err == nil {
 		t.Fatal("删不掉时不该返回成功")
 	}
 	if _, _, ok := m.Installed(spec.Name); !ok {
@@ -644,7 +644,7 @@ func TestRemoveKeepsPointerWhenActiveDirUndeletable(t *testing.T) {
 	if err := os.Chmod(active, 0o755); err != nil {
 		t.Fatalf("恢复权限: %v", err)
 	}
-	if err := m.Remove(spec.Name); err != nil {
+	if err := m.Remove(context.Background(), spec.Name); err != nil {
 		t.Fatalf("恢复权限后卸载: %v", err)
 	}
 	if _, _, ok := m.Installed(spec.Name); ok {

@@ -22,17 +22,26 @@ UA = (
     "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
 )
 
-# 页面打开后先等 10 秒再解题：jable/missav 都有 Cloudflare 验证，页面脚本要跑
-# 一会儿才把挑战过掉，等太短拿到的还是挑战页（真机上是这条链路最容易失败的地方）。
-PAGE_WAIT_SEC = 10
-# 解题后再等 5 秒，让标题、演员等 DOM 由页面 JS 渲染完再取源码。
-CAPTCHA_WAIT_SEC = 5
+# 页面打开后轮询等待就绪（能解析出 m3u8 与片名）：jable/missav 都有 Cloudflare
+# 验证，页面脚本要跑一会儿才把挑战过掉。条件满足就立刻往下走，不再死等固定秒数；
+# 上限给足，等太短拿到的还是挑战页（真机上是这条链路最容易失败的地方）。
+PAGE_WAIT_MAX_SEC = 15
+# 解题后的第二轮等待上限：让标题、演员等 DOM 由页面 JS 渲染完再取源码。
+CAPTCHA_WAIT_MAX_SEC = 10
+POLL_INTERVAL_SEC = 0.5
 
 
 class BaseScraper(ABC):
     def scrape(self, url: str) -> ScrapeResult:
         """主流程：抓取 -> 解析 -> 修正 -> 组装结果。"""
-        html = self.fetch_html(url)
+        try:
+            html = self.fetch_html(url, ready=self.page_ready)
+        except Exception as e:
+            # 异常类名要带出去：Go 侧日志里只有一句「获取失败」时没法排查。
+            logger.exception("Selenium 获取 HTML 失败")
+            return ScrapeResult(
+                ok=False, error=f"获取网页源码失败: {type(e).__name__}: {e}"
+            )
         if not html:
             return ScrapeResult(ok=False, error="获取网页源码失败")
 
@@ -62,30 +71,54 @@ class BaseScraper(ABC):
         )
 
     @staticmethod
-    def fetch_html(url: str) -> str | None:
+    def fetch_html(url: str, ready=None) -> str:
         """seleniumbase CDP 模式获取页面源码。
 
         SB 会把启动横幅、驱动下载进度等直接 print 到 stdout，
         这里整体重定向到 stderr，保证 stdout 只有最终那一行 JSON。
+
+        ready 是就绪判据（scrape 传入 page_ready）：第一轮轮询内就绪就跳过
+        解题；否则解一次验证码再轮询第二轮。异常向上抛，由 scrape 统一
+        转成带类名的错误信息。
         """
         logger.info("正在获取网页源码: %s", url)
-        try:
-            with (
-                contextlib.redirect_stdout(sys.stderr),
-                SB(uc=True, test=True, locale="en", headless=True) as sb,
-            ):
-                sb.activate_cdp_mode(url)
-                sb.sleep(PAGE_WAIT_SEC)
+        if ready is None:
+            ready = lambda html: bool(html and html.strip())  # noqa: E731
+        with (
+            contextlib.redirect_stdout(sys.stderr),
+            SB(uc=True, test=True, locale="en", headless=True) as sb,
+        ):
+            sb.activate_cdp_mode(url)
+            html = BaseScraper._wait_ready(sb, ready, PAGE_WAIT_MAX_SEC)
+            if not ready(html):
                 try:
                     sb.solve_captcha()
                 except Exception:
                     # 页面本来就没有验证码时，个别版本会抛错；能取到源码就不算失败
                     logger.debug("solve_captcha 跳过", exc_info=True)
-                sb.sleep(CAPTCHA_WAIT_SEC)
-                return sb.get_page_source()
+                html = BaseScraper._wait_ready(sb, ready, CAPTCHA_WAIT_MAX_SEC)
+            return html
+
+    @staticmethod
+    def _wait_ready(sb, ready, budget_sec: float) -> str:
+        """按 POLL_INTERVAL_SEC 轮询页面源码，直到就绪或耗尽预算。"""
+        html = sb.get_page_source()
+        waited = 0.0
+        while not ready(html) and waited < budget_sec:
+            sb.sleep(POLL_INTERVAL_SEC)
+            waited += POLL_INTERVAL_SEC
+            html = sb.get_page_source()
+        return html
+
+    def page_ready(self, html: str) -> bool:
+        """钩子方法：能解析出 m3u8 与片名即认为页面就绪（挑战页解析不出来）。"""
+        if not html:
+            return False
+        try:
+            m3u8, name = self.extract(html)
         except Exception:
-            logger.exception("Selenium 获取 HTML 失败")
-            return None
+            return False
+        return bool(m3u8 and name)
 
     @staticmethod
     def extract_group(

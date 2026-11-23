@@ -421,9 +421,20 @@ func (a *App) InstallComponent(name string) error {
 		defer a.setInstalling(name, false)
 
 		// 下载在慢网下要几分钟，解压还要几秒。整体超时给足，具体取消由 ctx
-		// 承担：用户关窗口时 a.ctx 会被取消。
+		// 承担：用户关窗口时 a.ctx 会被取消，点「取消」时走 installCancel。
 		ctx, cancel := context.WithTimeout(a.ctx, 30*time.Minute)
 		defer cancel()
+		a.installMu.Lock()
+		if a.installCancel == nil {
+			a.installCancel = map[string]context.CancelFunc{}
+		}
+		a.installCancel[name] = cancel
+		a.installMu.Unlock()
+		defer func() {
+			a.installMu.Lock()
+			delete(a.installCancel, name)
+			a.installMu.Unlock()
+		}()
 
 		spec, err := svc.specForInstall(ctx, def, mirror)
 		if err != nil {
@@ -472,7 +483,25 @@ func (a *App) RemoveComponent(name string) error {
 	}
 	a.setInstalling(name, true)
 	defer a.setInstalling(name, false)
-	return svc.manager.Remove(def.Name)
+	ctx := a.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	return svc.manager.Remove(ctx, def.Name)
+}
+
+// CancelInstall 取消正在进行的组件安装（安装卡片上的「取消」按钮）。
+func (a *App) CancelInstall(name string) error {
+	a.installMu.Lock()
+	cancel := a.installCancel[name]
+	a.installMu.Unlock()
+	if cancel == nil {
+		return fmt.Errorf("组件 %s 当前没有安装任务", name)
+	}
+	cancel()
+	return nil
 }
 
 func (a *App) setInstalling(name string, on bool) {
@@ -521,7 +550,11 @@ func (a *App) cleanupComponents() {
 		return
 	}
 	go func() {
-		if err := svc.manager.CleanupStale(); err != nil {
+		ctx := a.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if err := svc.manager.CleanupStale(ctx); err != nil {
 			log.Printf("提示：清理旧组件目录失败（下次启动会再试）：%v", err)
 		}
 	}()

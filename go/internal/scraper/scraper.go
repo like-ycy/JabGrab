@@ -17,7 +17,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"jabgrab/internal/proc"
@@ -87,7 +86,7 @@ func (s Scraper) Scrape(ctx context.Context, url, source string) (Result, error)
 	}
 
 	// stderr 可能很长（浏览器日志），实时转发给 UI，同时留最后几行做错误摘要。
-	tail := &ring{limit: 20}
+	tail := proc.NewRing(20)
 	stderrDone := make(chan struct{})
 	go func() {
 		defer close(stderrDone)
@@ -95,7 +94,7 @@ func (s Scraper) Scrape(ctx context.Context, url, source string) (Result, error)
 		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		for sc.Scan() {
 			line := sc.Text()
-			tail.push(line)
+			tail.Push(line)
 			if s.Log != nil {
 				s.Log(line)
 			}
@@ -116,7 +115,7 @@ func (s Scraper) Scrape(ctx context.Context, url, source string) (Result, error)
 	res, perr := ParseStdout(stdout.Bytes())
 	if perr != nil {
 		if waitErr != nil {
-			if msg := tail.summary(); msg != "" {
+			if msg := tail.Summary(); msg != "" {
 				return Result{}, fmt.Errorf("爬取进程异常退出: %v（%s）", waitErr, msg)
 			}
 			return Result{}, fmt.Errorf("爬取进程异常退出: %w", waitErr)
@@ -162,33 +161,4 @@ func utf8Env() []string {
 		out = append(out, kv)
 	}
 	return append(out, "PYTHONUTF8=1", "PYTHONIOENCODING=utf-8")
-}
-
-// ring 保存最后 N 行，用于错误摘要。
-type ring struct {
-	mu    sync.Mutex
-	limit int
-	buf   []string
-}
-
-func (r *ring) push(s string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.buf = append(r.buf, s)
-	if len(r.buf) > r.limit {
-		r.buf = r.buf[1:]
-	}
-}
-
-func (r *ring) summary() string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if len(r.buf) == 0 {
-		return ""
-	}
-	line := strings.TrimSpace(r.buf[len(r.buf)-1])
-	if len(line) > 240 {
-		line = line[len(line)-240:]
-	}
-	return line
 }

@@ -15,7 +15,11 @@ const STATUS_TEXT = {
 
 const el = (id) => document.getElementById(id);
 
-let draft = null; // 设置页正在编辑的配置副本
+// 纯函数与 node:test 共用一份实现（见 pure.js）
+const { clone, normalize, humanSize, baseName, dirName, escapeHtml, summarize } = window.JabPure;
+
+let draft = null; // 设置页正在编辑的配置副本（输入 → draft 单向流动）
+let savedConfig = null; // 最近一次保存成功的配置，用来判断「有没有未保存修改」
 // 外部组件的最近一次状态。它同时被设置页的卡片与任务页的提示条使用，
 // 所以放在模块级：两个视图渲染同源数据，不会出现「设置页说没装、任务页说装好了」。
 let components = [];
@@ -25,6 +29,7 @@ let logCount = 0;
 let followLog = true;
 let logScroll = { top: 0, remainder: 0 };
 const LOG_LIMIT = 2000;
+let logFilter = { level: "all", query: "" };
 
 /* ---------- 启动 ---------- */
 
@@ -33,6 +38,11 @@ async function boot() {
     bindButtons();
     bindTaskActions();
     bindPaneDivider();
+    bindSettings();
+    bindLogTools();
+    bindModal();
+    bindComponentActions();
+    bindSettingsNav();
 
     if (!api()) {
         appendLog({ level: "error", text: "未检测到后端绑定，请通过 JabGrab 程序启动本界面。" });
@@ -43,11 +53,13 @@ async function boot() {
 
     try {
         const info = await api().Boot();
-        draft = normalize(info.config);
+        savedConfig = normalize(info.config);
+        draft = clone(savedConfig);
         componentsDir = info.componentsDir || "";
         setComponents(info.components || [], info);
         renderEnv(info);
         renderSettings(draft);
+        markDirty();
         renderState(info.state || lastState);
         appendLog({
             level: "info",
@@ -59,45 +71,32 @@ async function boot() {
         appendLog({ level: "error", text: "初始化失败: " + err });
     }
 
-    window.runtime.EventsOn("pipeline:state", (s) => renderState(s));
+    // 状态快照可能一秒来好几条（进度限流后仍有 ~7 条/秒），
+    // 用 rAF 合帧：一帧内只渲染最后一份快照。
+    window.runtime.EventsOn("pipeline:state", (s) => queueRender(s));
     window.runtime.EventsOn("pipeline:log", (l) => appendLog(l));
 
-    // 组件事件：进度按 100ms 限流后推来，done/failed 是终态。
-    // 刷新（refreshed）只表示「清单拉回来了」，用 ListComponents 重取一次最稳。
-    window.runtime.EventsOn("component:progress", (p) => {
-        const c = components.find((x) => x.name === p.name);
-        if (!c) return;
-        c.installing = true;
-        c.progressDone = p.done;
-        c.progressTotal = p.total;
-        renderComponents();
-    });
+    // 组件事件：进度按 100ms 限流后推来，只更新进度条与文字，不重建卡片；
+    // done/failed 是终态。刷新（refreshed）只表示「清单拉回来了」，重取一次最稳。
+    window.runtime.EventsOn("component:progress", (p) => onComponentProgress(p));
     window.runtime.EventsOn("component:done", (p) => {
         appendLog({ level: "info", text: `组件 ${p.name} ${p.version} 已安装` });
+        toast(`组件 ${p.name} 已安装`, "ok");
         refreshComponents();
     });
     window.runtime.EventsOn("component:failed", (p) => {
         appendLog({ level: "error", text: `组件 ${p.name} 安装失败：${p.message}` });
+        toast(`组件 ${p.name} 安装失败：${p.message}`, "error");
         refreshComponents();
     });
     window.runtime.EventsOn("component:refreshed", () => refreshComponents());
-}
 
-function normalize(cfg) {
-    const c = JSON.parse(JSON.stringify(cfg || {}));
-    c.saveDir = c.saveDir || "";
-    c.txtPath = c.txtPath || "";
-    c.recentTxt = c.recentTxt || [];
-    c.dlrPath = c.dlrPath || "";
-    c.pythonCmd = c.pythonCmd || "";
-    c.ffmpegPath = c.ffmpegPath || "";
-    c.playerPath = c.playerPath || "";
-    c.componentMirror = c.componentMirror || "";
-    c.componentsOnDemand = c.componentsOnDemand !== false;
-    c.sites = c.sites || {};
-    c.download = c.download || {};
-    c.scrapeTimeoutSec = c.scrapeTimeoutSec || 180;
-    return c;
+    // 下载器版本是后台异步探测的，探测完成后补进徽标。
+    window.runtime.EventsOn("dlr:version", (v) => {
+        if (!v || !v.version) return;
+        const badge = el("envBadge");
+        if (badge.classList.contains("ok")) badge.textContent = v.version;
+    });
 }
 
 /* ---------- 视图切换 ---------- */
@@ -112,6 +111,17 @@ function bindTabs() {
             btn.classList.add("active");
             el("view-" + btn.dataset.view).classList.add("active");
             if (log.clientHeight > 0 && followLog) log.scrollTop = log.scrollHeight;
+        });
+    });
+}
+
+function bindSettingsNav() {
+    document.querySelectorAll("[data-goto]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            const card = el(btn.dataset.goto);
+            if (!card) return;
+            if (card.tagName === "DETAILS") card.open = true;
+            card.scrollIntoView({ behavior: "smooth", block: "start" });
         });
     });
 }
@@ -217,96 +227,86 @@ function renderEnv(info) {
 
 /* ---------- 任务状态渲染 ---------- */
 
+// 一帧内只渲染最后一份快照：进度事件再密，DOM 更新也不超过屏幕刷新率。
+let pendingState = null;
+let renderScheduled = false;
+
+function queueRender(s) {
+    if (!s) return;
+    pendingState = s;
+    if (renderScheduled) return;
+    renderScheduled = true;
+    const flush = () => {
+        renderScheduled = false;
+        const next = pendingState;
+        pendingState = null;
+        renderState(next);
+    };
+    // 页面隐藏（窗口最小化 / 后台标签页）时 rAF 不触发，退回定时器，
+    // 否则状态会一直卡在最后一帧，恢复可见前 DOM 与后端对不上。
+    if (document.hidden) setTimeout(flush, 16);
+    else requestAnimationFrame(flush);
+}
+
+// 行级差量：URL 序列没变时只重建「内容签名」变了的行。
+// 全量 innerHTML 重建会打断文本选择、让按钮闪断，几十行任务时还白白烧 CPU。
+let rowUrls = [];
+let rowSigs = [];
+
+function rowSig(it, running) {
+    return JSON.stringify([
+        it.status, it.percent, it.speed, it.eta, it.downloaded, it.totalSize,
+        it.name, it.message, it.path, it.actors, running,
+    ]);
+}
+
 function renderState(s) {
     if (!s) return;
     lastState = s;
 
     const items = s.items || [];
     const body = el("taskBody");
+    const running = !!s.running;
 
     if (items.length === 0) {
-        body.innerHTML = '<tr class="empty"><td colspan="9">没有可处理的任务，请选择 txt 并确认已启用站点</td></tr>';
-        setOverall(0);
+        body.innerHTML = `<tr class="empty"><td colspan="7">
+            <div class="empty-box">
+                <p>没有可处理的任务，请选择 txt 并确认已启用站点</p>
+                <button class="primary" data-action="pick">选择 txt</button>
+            </div>
+        </td></tr>`;
+        rowUrls = [];
+        rowSigs = [];
+        setOverallSegments(0, 0, 0);
         el("summaryText").textContent = "等待开始";
         el("summaryDetail").textContent = "";
-        setRunning(!!s.running);
+        setRunning(running);
         return;
     }
 
-    const html = items.map((it, i) => {
-        const st = it.status || "pending";
-        const pct = st === "done" ? 100 : Number(it.percent || 0);
-        const showBar = st === "downloading" || st === "done" || pct > 0;
-        const name = it.name || "";
-        const msg = it.message || "";
-
-        const progress = showBar
-            ? `<div class="progress-cell">
-                   <div class="bar small"><i style="width:${Math.min(100, pct).toFixed(1)}%"></i></div>
-                   <div class="progress-meta">
-                       <span>${pct.toFixed(1)}%</span>
-                       <span>${it.downloaded ? it.downloaded + " / " + (it.totalSize || "?") : ""}</span>
-                   </div>
-               </div>`
-            : `<span class="hint">${escapeHtml(msg)}</span>`;
-
-        const speed = it.speed ? `${it.speed}${it.eta ? " · " + it.eta : ""}` : "";
-
-        // 只有下好的（完成 / 已存在）才有成品路径；其它状态留个空单元格，
-        // 免得整列按钮在下载途中点不动还闪来闪去。
-        const playCell = it.path
-            ? `<button class="play-btn" data-play="${escapeHtml(it.path)}"
-                       title="播放 ${escapeHtml(it.path)}">▶ 播放</button>`
-            : "";
-        const revealCell = it.path
-            ? `<button class="reveal-btn" data-reveal="${escapeHtml(it.path)}"
-                       title="打开 ${escapeHtml(dirName(it.path))}">打开文件夹</button>`
-            : "";
-
-        // 演员名在爬取完成后才有；取不到时留占位符，避免整列空白看不出区别。
-        const actors = Array.isArray(it.actors) ? it.actors.filter(Boolean) : [];
-        const actorText = actors.join("、");
-        const actorCell = actorText
-            ? `<span class="actor" title="${escapeHtml(actorText)}">${escapeHtml(actorText)}</span>`
-            : '<span class="hint">—</span>';
-
-        return `<tr class="${st === "failed" ? "row-failed" : ""}">
-            <td class="col-idx">${i + 1}</td>
-            <td class="cell-name">
-                <div class="name">${escapeHtml(name || "—")}</div>
-                <div class="url">${escapeHtml(it.url || "")}</div>
-            </td>
-            <td class="col-actor cell-actor">${actorCell}</td>
-            <td class="col-site"><span class="tag">${escapeHtml(it.site || "-")}</span></td>
-            <td class="col-status"><span class="tag ${st}">${STATUS_TEXT[st] || st}</span></td>
-            <td class="col-progress">${progress}</td>
-            <td class="col-speed speed-cell">${escapeHtml(speed)}</td>
-            <td class="col-play">${playCell}</td>
-            <td class="col-reveal">${revealCell}</td>
-        </tr>`;
-    });
-
-    body.innerHTML = html.join("");
-
-    // 总体进度：已结束的按 100%，当前下载中按实际百分比
-    let acc = 0;
-    let finished = 0;
-    let current = null;
-    for (const it of items) {
-        const st = it.status || "pending";
-        if (["done", "skipped"].includes(st)) {
-            acc += 1;
-            finished += 1;
-        } else if (st === "failed" || st === "cancelled") {
-            acc += 1;
-        } else if (st === "downloading") {
-            acc += Math.min(1, (it.percent || 0) / 100);
-            current = it;
-        }
+    const urls = items.map((it) => it.url || "");
+    const sameRows =
+        urls.length === rowUrls.length && urls.every((u, i) => u === rowUrls[i]);
+    if (!sameRows) {
+        body.innerHTML = items.map((it, i) => rowHtml(it, i, running)).join("");
+        rowSigs = items.map((it) => rowSig(it, running));
+    } else {
+        const rows = body.children;
+        items.forEach((it, i) => {
+            const sig = rowSig(it, running);
+            if (sig === rowSigs[i]) return;
+            rowSigs[i] = sig;
+            rows[i].className = it.status === "failed" ? "row-failed" : "";
+            rows[i].innerHTML = rowCells(it, i, running);
+        });
     }
-    setOverall((acc / items.length) * 100);
+    rowUrls = urls;
 
-    const running = !!s.running;
+    // 总体进度分三段：成功（绿）、失败/取消（红）、当前条目（蓝，按实际百分比）。
+    const { ok, bad, cur, current } = summarize(items);
+    const n = items.length;
+    setOverallSegments((ok / n) * 100, (bad / n) * 100, (cur / n) * 100);
+
     setRunning(running);
 
     if (running) {
@@ -315,14 +315,88 @@ function renderState(s) {
             ? `${current.name || ""} · ${(current.percent || 0).toFixed(1)}%`
             : "处理中…";
     } else {
-        const failed = items.filter((i) => i.status === "failed").length;
-        el("summaryText").textContent = `共 ${s.total} 条，完成 ${finished}${failed ? `，失败 ${failed}` : ""}`;
-        el("summaryDetail").textContent = finished + failed === s.total && s.total > 0 ? "本轮结束" : "";
+        el("summaryText").textContent = `共 ${s.total} 条，完成 ${ok}${bad ? `，失败/取消 ${bad}` : ""}`;
+        el("summaryDetail").textContent = ok + bad === s.total && s.total > 0 ? "本轮结束" : "";
     }
 }
 
-function setOverall(pct) {
-    el("overallBar").style.width = Math.max(0, Math.min(100, pct)).toFixed(1) + "%";
+function rowHtml(it, i, running) {
+    const cls = it.status === "failed" ? ' class="row-failed"' : "";
+    return `<tr${cls}>${rowCells(it, i, running)}</tr>`;
+}
+
+function rowCells(it, i, running) {
+    const st = it.status || "pending";
+    const pct = Math.min(100, Number(it.percent || 0));
+    const msg = it.message || "";
+
+    // 状态与进度合并成一列：下载中给进度条；失败永远显示原因（哪怕有过半截进度）；
+    // 其余状态显示后端给的说明（已存在 / 取消原因等）。
+    let extra = "";
+    if (st === "downloading") {
+        extra = `<div class="bar small"><i style="width:${pct.toFixed(1)}%"></i></div>
+            <div class="progress-meta">
+                <span>${pct.toFixed(1)}%</span>
+                <span>${it.downloaded ? escapeHtml(it.downloaded + " / " + (it.totalSize || "?")) : ""}</span>
+            </div>`;
+    } else if (st === "failed") {
+        extra = `<div class="state-msg err" title="${escapeHtml(msg)}">${escapeHtml(msg || "未知错误")}</div>`;
+    } else if (msg) {
+        extra = `<div class="state-msg" title="${escapeHtml(msg)}">${escapeHtml(msg)}</div>`;
+    } else if (st === "scraping") {
+        extra = '<div class="state-msg">解析页面中…</div>';
+    }
+
+    const speed = it.speed ? `${it.speed}${it.eta ? " · " + it.eta : ""}` : "";
+
+    const actors = Array.isArray(it.actors) ? it.actors.filter(Boolean) : [];
+    const actorText = actors.join("、");
+    const actorCell = actorText
+        ? `<span class="actor" title="${escapeHtml(actorText)}">${escapeHtml(actorText)}</span>`
+        : '<span class="hint">—</span>';
+
+    // 操作合并成一列：成品存在才有播放/文件夹；复制永远可用；
+    // 重试只给失败/取消的行，移除只在停着的时候给（运行中动队列会和后端对不上）。
+    const acts = [];
+    if (it.path) {
+        acts.push(`<button class="mini play-btn" data-action="play" data-path="${escapeHtml(it.path)}"
+            title="播放 ${escapeHtml(it.path)}">播放</button>`);
+        acts.push(`<button class="mini reveal-btn" data-action="reveal" data-path="${escapeHtml(it.path)}"
+            title="打开 ${escapeHtml(dirName(it.path))}">文件夹</button>`);
+    }
+    acts.push(`<button class="mini ghost" data-action="copy" data-url="${escapeHtml(it.url || "")}"
+        title="复制这条 URL">复制</button>`);
+    if (!running && (st === "failed" || st === "cancelled")) {
+        acts.push(`<button class="mini" data-action="retry" data-idx="${i}" title="只重试这一条">重试</button>`);
+    }
+    if (!running) {
+        acts.push(`<button class="mini ghost danger-text" data-action="remove" data-idx="${i}"
+            title="从队列移除（不改 txt 文件）">移除</button>`);
+    }
+
+    return `
+        <td class="col-idx">${i + 1}</td>
+        <td class="cell-name">
+            <div class="name">${escapeHtml(it.name || "—")}</div>
+            <div class="url" title="${escapeHtml(it.url || "")}">${escapeHtml(it.url || "")}</div>
+        </td>
+        <td class="col-actor cell-actor">${actorCell}</td>
+        <td class="col-site"><span class="tag">${escapeHtml(it.site || "-")}</span></td>
+        <td class="col-state">
+            <div class="state-cell">
+                <span class="tag ${escapeHtml(st)}">${escapeHtml(STATUS_TEXT[st] || st)}</span>
+                ${extra}
+            </div>
+        </td>
+        <td class="col-speed speed-cell">${escapeHtml(speed)}</td>
+        <td class="col-actions"><div class="cell-actions">${acts.join("")}</div></td>`;
+}
+
+function setOverallSegments(okPct, badPct, curPct) {
+    const clamp = (v) => Math.max(0, Math.min(100, v)).toFixed(2) + "%";
+    el("segOk").style.width = clamp(okPct);
+    el("segBad").style.width = clamp(badPct);
+    el("segCur").style.width = clamp(curPct);
 }
 
 function setRunning(running) {
@@ -333,18 +407,32 @@ function setRunning(running) {
     el("btnPrune").disabled = running;
 }
 
-/* ---------- 播放 / 打开文件夹 ---------- */
+/* ---------- 行内操作（事件委托，绑一次） ---------- */
 
-// 列表每次状态更新都重建 innerHTML，按钮是一次性的，所以用事件委托绑一次。
 function bindTaskActions() {
     el("taskBody").addEventListener("click", (event) => {
-        const play = event.target.closest("[data-play]");
-        if (play) {
-            playFile(play.dataset.play);
-            return;
+        const btn = event.target.closest("[data-action]");
+        if (!btn) return;
+        switch (btn.dataset.action) {
+            case "pick":
+                el("btnPickTxt").click();
+                break;
+            case "play":
+                playFile(btn.dataset.path);
+                break;
+            case "reveal":
+                revealFile(btn.dataset.path);
+                break;
+            case "copy":
+                copyText(btn.dataset.url);
+                break;
+            case "retry":
+                retryTask(Number(btn.dataset.idx));
+                break;
+            case "remove":
+                removeTask(Number(btn.dataset.idx));
+                break;
         }
-        const reveal = event.target.closest("[data-reveal]");
-        if (reveal) revealFile(reveal.dataset.reveal);
     });
 }
 
@@ -355,6 +443,7 @@ async function playFile(path) {
         appendLog({ level: "info", text: `已交给播放器：${baseName(path)}` });
     } catch (err) {
         appendLog({ level: "error", text: "播放失败: " + err });
+        toast("播放失败: " + err, "error");
     }
 }
 
@@ -365,6 +454,50 @@ async function revealFile(path) {
         appendLog({ level: "info", text: `已打开所在目录：${dirName(path)}` });
     } catch (err) {
         appendLog({ level: "error", text: "打开文件夹失败: " + err });
+        toast("打开文件夹失败: " + err, "error");
+    }
+}
+
+async function copyText(text) {
+    if (!text) return;
+    try {
+        await navigator.clipboard.writeText(text);
+        toast("链接已复制", "ok");
+    } catch {
+        // 个别 WebView 没开剪贴板权限，退回老办法
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+            document.execCommand("copy");
+            toast("链接已复制", "ok");
+        } catch {
+            toast("复制失败，请手动选择 URL", "error");
+        }
+        ta.remove();
+    }
+}
+
+async function retryTask(idx) {
+    if (!api()) return;
+    try {
+        await api().RetryTask(idx);
+    } catch (err) {
+        appendLog({ level: "error", text: "重试失败: " + err });
+        toast(String(err), "error");
+    }
+}
+
+async function removeTask(idx) {
+    if (!api()) return;
+    const it = (lastState.items || [])[idx];
+    try {
+        await api().RemoveTask(idx);
+        appendLog({ level: "info", text: `已从队列移除：${(it && it.url) || idx + 1}` });
+    } catch (err) {
+        appendLog({ level: "error", text: "移除失败: " + err });
+        toast(String(err), "error");
     }
 }
 
@@ -381,8 +514,11 @@ function appendLog(line) {
     if (visible) followLog = logAtBottom(pre);
     if (scrollTop !== logScroll.top) logScroll.remainder = 0;
     const div = document.createElement("div");
-    div.className = "l-" + (line.level || "info");
+    const level = line.level || "info";
+    div.className = "l-" + level;
+    div.dataset.level = level;
     div.textContent = line.text || "";
+    if (!lineVisible(div)) div.classList.add("filtered");
     pre.appendChild(div);
     logCount++;
 
@@ -398,6 +534,102 @@ function appendLog(line) {
         pre.scrollTop = target;
         logScroll = { top: pre.scrollTop, remainder: followLog ? 0 : target - pre.scrollTop };
     }
+}
+
+function lineVisible(div) {
+    const lv = div.dataset.level || "info";
+    if (logFilter.level !== "all") {
+        const ok =
+            logFilter.level === "info"
+                ? lv === "info" || lv === "debug"
+                : lv === logFilter.level;
+        if (!ok) return false;
+    }
+    if (logFilter.query && !div.textContent.toLowerCase().includes(logFilter.query)) {
+        return false;
+    }
+    return true;
+}
+
+function applyLogFilter() {
+    const pre = el("log");
+    for (const div of pre.children) {
+        div.classList.toggle("filtered", !lineVisible(div));
+    }
+    if (followLog) pre.scrollTop = pre.scrollHeight;
+}
+
+function bindLogTools() {
+    el("logFilters").addEventListener("click", (event) => {
+        const btn = event.target.closest("[data-level]");
+        if (!btn) return;
+        logFilter.level = btn.dataset.level;
+        el("logFilters").querySelectorAll(".chip").forEach((c) => {
+            c.classList.toggle("active", c === btn);
+        });
+        applyLogFilter();
+    });
+    let timer = 0;
+    el("logSearch").addEventListener("input", () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+            logFilter.query = el("logSearch").value.trim().toLowerCase();
+            applyLogFilter();
+        }, 150);
+    });
+}
+
+/* ---------- 轻提示与确认弹窗 ---------- */
+
+function toast(text, kind = "info") {
+    const box = el("toasts");
+    const div = document.createElement("div");
+    div.className = "toast " + kind;
+    div.textContent = text;
+    div.title = "点击关闭";
+    div.addEventListener("click", () => div.remove());
+    box.appendChild(div);
+    while (box.children.length > 4) box.firstChild.remove();
+    setTimeout(() => {
+        div.classList.add("out");
+        setTimeout(() => div.remove(), 260);
+    }, 3500);
+}
+
+let modalResolve = null;
+
+function confirmDialog({ title, text, okText = "确定", danger = false }) {
+    return new Promise((resolve) => {
+        el("modalTitle").textContent = title;
+        el("modalText").textContent = text;
+        const ok = el("btnModalOk");
+        ok.textContent = okText;
+        ok.className = danger ? "danger" : "primary";
+        el("modalMask").classList.remove("hidden");
+        modalResolve = resolve;
+        ok.focus();
+    });
+}
+
+function closeModal(result) {
+    el("modalMask").classList.add("hidden");
+    if (modalResolve) {
+        modalResolve(result);
+        modalResolve = null;
+    }
+}
+
+function bindModal() {
+    el("btnModalOk").addEventListener("click", () => closeModal(true));
+    el("btnModalCancel").addEventListener("click", () => closeModal(false));
+    el("modalMask").addEventListener("click", (event) => {
+        if (event.target === el("modalMask")) closeModal(false);
+    });
+    document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && !el("modalMask").classList.contains("hidden")) {
+            closeModal(false);
+        }
+    });
 }
 
 /* ---------- 外部组件 ---------- */
@@ -426,18 +658,11 @@ async function refreshComponents() {
     }
 }
 
-function humanSize(bytes) {
-    const n = Number(bytes || 0);
-    if (n <= 0) return "";
-    const mb = n / (1024 * 1024);
-    return mb >= 1024 ? (mb / 1024).toFixed(1) + " GB" : mb.toFixed(1) + " MB";
-}
-
 function componentCard(c) {
     // 「装没装组件」与「能不能用」是两件事：整包用户、手动指定的用户都没装组件，
     // 但刮削/下载照常工作。卡片上把它们混成一句「未安装」会让人以为必须点下载。
     const usable = !!c.path;
-    let st = COMPONENT_STATE[c.state] || { text: c.state || "未知", cls: "cancelled" };
+    let st = COMPONENT_STATE[c.state] || { text: escapeHtml(c.state || "未知"), cls: "cancelled" };
     if (!usable && c.state === "missing") {
         st = { text: "缺失", cls: "failed" };
     } else if (usable && (c.state === "missing" || c.state === "outdated")) {
@@ -459,10 +684,13 @@ function componentCard(c) {
     let action = "";
     if (c.installing) {
         const pct = c.progressTotal ? Math.min(100, (c.progressDone / c.progressTotal) * 100) : 0;
-        action = `<div class="bar small"><i style="width:${pct.toFixed(1)}%"></i></div>
-                  <div class="comp-meta">下载中 ${humanSize(c.progressDone)}${
-                      c.progressTotal ? " / " + humanSize(c.progressTotal) : ""
-                  }</div>`;
+        action = `<div class="bar small"><i data-bar style="width:${pct.toFixed(1)}%"></i></div>
+                  <div class="comp-actions">
+                      <span class="comp-meta" data-meta>下载中 ${humanSize(c.progressDone)}${
+                          c.progressTotal ? " / " + humanSize(c.progressTotal) : ""
+                      }</span>
+                      <button class="ghost" data-cancel="${escapeHtml(c.name)}">取消</button>
+                  </div>`;
     } else {
         const buttons = [];
         if (c.canInstall && c.onDemand && c.state !== "ready") {
@@ -480,7 +708,7 @@ function componentCard(c) {
         action = `<div class="comp-actions">${buttons.join("")}</div>`;
     }
 
-    return `<div class="comp">
+    return `<div class="comp" data-comp="${escapeHtml(c.name)}">
         <div class="comp-head">
             <strong>${escapeHtml(c.label || c.name)}</strong>
             <span class="tag ${st.cls}">${st.text}</span>
@@ -494,22 +722,51 @@ function componentCard(c) {
 function renderComponents() {
     const box = el("componentList");
     if (box) {
-        if (components.length === 0) {
-            box.innerHTML = '<p class="hint">未读到组件信息（组件目录不可用，或本构建没有清单）</p>';
-        } else {
-            box.innerHTML = components.map(componentCard).join("");
-            box.querySelectorAll("[data-install]").forEach((btn) => {
-                btn.addEventListener("click", () => installComponent(btn.dataset.install));
-            });
-            box.querySelectorAll("[data-remove]").forEach((btn) => {
-                btn.addEventListener("click", () => removeComponent(btn.dataset.remove));
-            });
-        }
+        box.innerHTML =
+            components.length === 0
+                ? '<p class="hint">未读到组件信息（组件目录不可用，或本构建没有清单）</p>'
+                : components.map(componentCard).join("");
     }
     if (el("componentsDir")) {
         el("componentsDir").textContent = componentsDir ? "安装目录：" + componentsDir : "";
     }
     renderComponentBanner();
+}
+
+// 进度事件每秒来十条：只改进度条宽度与字节数文字，不重建卡片。
+// 重建会打断「取消」按钮的点击，还让整页跟着闪。
+function onComponentProgress(p) {
+    const c = components.find((x) => x.name === p.name);
+    if (!c) return;
+    const wasInstalling = c.installing;
+    c.installing = true;
+    c.progressDone = p.done;
+    c.progressTotal = p.total;
+    const card = document.querySelector(`[data-comp="${CSS.escape(p.name)}"]`);
+    if (!wasInstalling || !card) {
+        renderComponents();
+        return;
+    }
+    const bar = card.querySelector("[data-bar]");
+    const meta = card.querySelector("[data-meta]");
+    const pct = p.total ? Math.min(100, (p.done / p.total) * 100) : 0;
+    if (bar) bar.style.width = pct.toFixed(1) + "%";
+    if (meta) {
+        meta.textContent = `下载中 ${humanSize(p.done)}${p.total ? " / " + humanSize(p.total) : ""}`;
+    }
+}
+
+function bindComponentActions() {
+    const box = el("componentList");
+    if (!box) return;
+    box.addEventListener("click", (event) => {
+        const install = event.target.closest("[data-install]");
+        if (install) return installComponent(install.dataset.install);
+        const remove = event.target.closest("[data-remove]");
+        if (remove) return removeComponent(remove.dataset.remove);
+        const cancel = event.target.closest("[data-cancel]");
+        if (cancel) return cancelInstall(cancel.dataset.cancel);
+    });
 }
 
 // 任务页顶部的缺口提示：只在「真的缺、且用户没关掉入口」时出现。
@@ -545,15 +802,34 @@ async function installComponent(name) {
         }
     } catch (err) {
         appendLog({ level: "error", text: "启动下载失败: " + err });
+        toast("启动下载失败: " + err, "error");
+    }
+}
+
+async function cancelInstall(name) {
+    if (!api()) return;
+    try {
+        await api().CancelInstall(name);
+        appendLog({ level: "warn", text: `已请求取消组件 ${name} 的下载` });
+    } catch (err) {
+        appendLog({ level: "error", text: "取消下载失败: " + err });
     }
 }
 
 async function removeComponent(name) {
     if (!api()) return;
+    const ok = await confirmDialog({
+        title: "移除组件",
+        text: `确定移除组件 ${name} 的已安装副本？之后可随时重新下载。`,
+        okText: "移除",
+        danger: true,
+    });
+    if (!ok) return;
     try {
         await api().RemoveComponent(name);
     } catch (err) {
         appendLog({ level: "error", text: "移除失败: " + err });
+        toast("移除失败: " + err, "error");
     }
     await refreshComponents();
 }
@@ -607,12 +883,6 @@ function renderSites(sites) {
             </div>`;
         })
         .join("");
-
-    box.querySelectorAll(".site-row").forEach((row) => {
-        const name = row.dataset.site;
-        const toggle = () => row.classList.toggle("off", !row.querySelector('[data-role="enabled"]').checked);
-        row.querySelector('[data-role="enabled"]').addEventListener("change", toggle);
-    });
 }
 
 function renderRecent(list) {
@@ -625,46 +895,104 @@ function renderRecent(list) {
         .slice(0, 6)
         .map((p) => `<button data-recent="${escapeHtml(p)}">${escapeHtml(baseName(p))}</button>`)
         .join("");
-    box.querySelectorAll("button[data-recent]").forEach((btn) => {
-        btn.addEventListener("click", () => {
-            el("txtPathInput").value = btn.dataset.recent;
-        });
-    });
 }
 
-function collectConfig() {
-    const cfg = normalize(draft);
-    cfg.saveDir = el("saveDir").value.trim();
-    cfg.txtPath = el("txtPathInput").value.trim();
-    cfg.dlrPath = el("dlrPath").value.trim();
-    cfg.pythonCmd = el("pythonCmd").value.trim();
-    if (el("ffmpegPath")) cfg.ffmpegPath = el("ffmpegPath").value.trim();
-    if (el("playerPath")) cfg.playerPath = el("playerPath").value.trim();
-    if (el("componentMirror")) cfg.componentMirror = el("componentMirror").value.trim();
-    if (el("componentsOnDemand")) cfg.componentsOnDemand = el("componentsOnDemand").checked;
-    cfg.scrapeTimeoutSec = intVal("scrapeTimeoutSec", 180);
-    cfg.download = {
-        threads: intVal("threads", 25),
-        retryCount: intVal("retryCount", 20),
-        timeoutSec: intVal("timeoutSec", 30),
-        maxSpeed: el("maxSpeed").value.trim(),
-        muxToMP4: el("muxToMP4").checked,
-    };
-
-    const sites = {};
-    document.querySelectorAll(".site-row").forEach((row) => {
-        sites[row.dataset.site] = {
-            enabled: row.querySelector('[data-role="enabled"]').checked,
-            keyword: row.querySelector('[data-role="keyword"]').value.trim(),
-        };
-    });
-    cfg.sites = sites;
-    return cfg;
+// 输入 → draft 单向流动：DOM 事件只改 draft，保存时把 draft 交给后端；
+// 后端回包再整体写回 DOM。不再在保存时从 DOM 反读，避免「界面一套、配置一套」。
+function setDraftField(id, value) {
+    if (!draft) return;
+    switch (id) {
+        case "saveDir": draft.saveDir = value; break;
+        case "txtPathInput": draft.txtPath = value; break;
+        case "dlrPath": draft.dlrPath = value; break;
+        case "pythonCmd": draft.pythonCmd = value; break;
+        case "ffmpegPath": draft.ffmpegPath = value; break;
+        case "playerPath": draft.playerPath = value; break;
+        case "componentMirror": draft.componentMirror = value; break;
+        case "componentsOnDemand": draft.componentsOnDemand = value; break;
+        case "threads": draft.download.threads = value; break;
+        case "retryCount": draft.download.retryCount = value; break;
+        case "timeoutSec": draft.download.timeoutSec = value; break;
+        case "maxSpeed": draft.download.maxSpeed = value; break;
+        case "muxToMP4": draft.download.muxToMP4 = value; break;
+        case "scrapeTimeoutSec": draft.scrapeTimeoutSec = value; break;
+        default: return;
+    }
+    markDirty();
 }
 
-function intVal(id, fallback) {
-    const n = parseInt(el(id).value, 10);
-    return Number.isFinite(n) && n > 0 ? n : fallback;
+function markDirty() {
+    if (!draft || !savedConfig) return;
+    const dirty = JSON.stringify(draft) !== JSON.stringify(savedConfig);
+    el("saveBar").classList.toggle("dirty", dirty);
+    el("btnReset").classList.toggle("hidden", !dirty);
+    el("btnSave").disabled = !dirty;
+    el("saveHint").textContent = dirty ? "有未保存的修改" : "";
+    el("saveHint").className = "hint" + (dirty ? " warn-text" : "");
+}
+
+function bindSettings() {
+    const view = el("view-settings");
+
+    view.addEventListener("input", (event) => {
+        const t = event.target;
+        if (!draft) return;
+        if (t.dataset.role === "keyword") {
+            const row = t.closest(".site-row");
+            if (row && draft.sites[row.dataset.site]) {
+                draft.sites[row.dataset.site].keyword = t.value;
+                markDirty();
+            }
+            return;
+        }
+        // 数字与复选框在 change 里处理（数字要夹取范围后写回）
+        if (t.type === "number" || t.type === "checkbox") return;
+        if (t.id) setDraftField(t.id, t.value);
+    });
+
+    view.addEventListener("change", (event) => {
+        const t = event.target;
+        if (!draft) return;
+        if (t.dataset.role === "enabled") {
+            const row = t.closest(".site-row");
+            if (row && draft.sites[row.dataset.site]) {
+                draft.sites[row.dataset.site].enabled = t.checked;
+                row.classList.toggle("off", !t.checked);
+                markDirty();
+            }
+            return;
+        }
+        if (t.type === "checkbox") {
+            setDraftField(t.id, t.checked);
+            return;
+        }
+        if (t.type === "number") {
+            // 越界/乱填的值夹回范围并写回输入框，而不是悄悄换成默认值。
+            const min = Number(t.min);
+            const max = Number(t.max);
+            let n = parseInt(t.value, 10);
+            if (!Number.isFinite(n)) n = Number(t.dataset.fallback || t.min || 1);
+            if (Number.isFinite(min)) n = Math.max(min, n);
+            if (Number.isFinite(max)) n = Math.min(max, n);
+            t.value = String(n);
+            setDraftField(t.id, n);
+            return;
+        }
+        if (t.id) setDraftField(t.id, t.value.trim());
+    });
+
+    el("recentTxt").addEventListener("click", (event) => {
+        const btn = event.target.closest("[data-recent]");
+        if (!btn) return;
+        el("txtPathInput").value = btn.dataset.recent;
+        setDraftField("txtPathInput", btn.dataset.recent);
+    });
+
+    el("btnReset").addEventListener("click", () => {
+        draft = clone(savedConfig);
+        renderSettings(draft);
+        markDirty();
+    });
 }
 
 /* ---------- 按钮 ---------- */
@@ -674,6 +1002,7 @@ function bindButtons() {
         const p = await api().SelectTxt();
         if (!p) return;
         el("txtPathInput").value = p;
+        setDraftField("txtPathInput", p);
         await saveSettings(true);
     });
 
@@ -685,6 +1014,7 @@ function bindButtons() {
             appendLog({ level: "error", text: String(err) });
             el("issueBanner").textContent = String(err);
             el("issueBanner").classList.remove("hidden");
+            toast(String(err), "error");
         }
     });
 
@@ -694,30 +1024,45 @@ function bindButtons() {
     });
 
     // 把成功的那些 URL 从清单里抹掉，失败的留下：下一次「开始」就只重试剩下的。
-    // txt 里的行删掉后，界面上的任务队列也一并清空（后端一起做了）。
+    // 这是改用户文件的动作，先确认再动手；后端会先把原文件备份到配置目录。
     el("btnPrune").addEventListener("click", async () => {
+        const items = lastState.items || [];
+        const doneCount = items.filter((i) => ["done", "skipped"].includes(i.status)).length;
+        const file = baseName((draft && draft.txtPath) || "txt");
+        const ok = await confirmDialog({
+            title: "清除已下载",
+            text:
+                `将从 ${file} 里删除已下载成功（完成 / 已存在）的 URL${doneCount ? `，本轮共 ${doneCount} 条` : ""}，` +
+                "失败的保留等下次重试。\n原文件会先备份到配置目录（txt.bak），任务队列也会一并清空。",
+            okText: "清除",
+            danger: true,
+        });
+        if (!ok) return;
         try {
             const res = await api().ClearDownloaded();
-            const file = baseName((res && res.path) || "txt");
+            const name = baseName((res && res.path) || "txt");
             if (!res || !res.removed) {
                 // 两种可能：本轮没有成功的条目，或清单里早就没有这些行了
                 // （上次已清理 / 换了 txt）。话术上不猜是哪一种。
                 appendLog({
                     level: "info",
-                    text: `没有可删除的 URL：${file} 里找不到本轮已下载的条目（清单还剩 ${
+                    text: `没有可删除的 URL：${name} 里找不到本轮已下载的条目（清单还剩 ${
                         res ? res.kept : 0
                     } 条），任务队列已清空`,
                 });
+                toast("没有可删除的 URL，任务队列已清空");
                 return;
             }
             appendLog({
                 level: "info",
-                text: `已从 ${file} 删除 ${res.removed} 条已下载 URL，清单剩余 ${
+                text: `已从 ${name} 删除 ${res.removed} 条已下载 URL，清单剩余 ${
                     res.kept
                 } 条 —— 任务队列已清空，下次「开始」只跑剩下的`,
             });
+            toast(`已删除 ${res.removed} 条已下载 URL`, "ok");
         } catch (err) {
             appendLog({ level: "error", text: "清除已下载 URL 失败: " + err });
+            toast("清除已下载 URL 失败: " + err, "error");
         }
     });
 
@@ -743,10 +1088,12 @@ function bindButtons() {
             if (!fn) return;
             const p = await fn();
             if (!p) return;
-            if (kind === "saveDir") el("saveDir").value = p;
-            if (kind === "txt") el("txtPathInput").value = p;
-            if (kind === "dlr") el("dlrPath").value = p;
-            if (kind === "player") el("playerPath").value = p;
+            const targets = { saveDir: "saveDir", txt: "txtPathInput", dlr: "dlrPath", player: "playerPath" };
+            const id = targets[kind];
+            if (id) {
+                el(id).value = p;
+                setDraftField(id, p);
+            }
         });
     });
 
@@ -755,21 +1102,38 @@ function bindButtons() {
     }
 
     el("btnSave").addEventListener("click", () => saveSettings(false));
+
+    // 徽标有问题时点一下，直接定位到问题横幅
+    el("envBadge").addEventListener("click", () => {
+        const banner = el("issueBanner");
+        if (banner.classList.contains("hidden")) return;
+        banner.scrollIntoView({ block: "nearest" });
+        banner.classList.remove("flash");
+        void banner.offsetWidth;
+        banner.classList.add("flash");
+    });
 }
 
 async function saveSettings(quiet) {
-    if (!api()) return;
-    const cfg = collectConfig();
+    if (!api() || !draft) return;
+    const cfg = clone(draft);
+    for (const k of ["saveDir", "txtPath", "dlrPath", "pythonCmd", "ffmpegPath", "playerPath", "componentMirror"]) {
+        cfg[k] = (cfg[k] || "").trim();
+    }
+    cfg.download.maxSpeed = (cfg.download.maxSpeed || "").trim();
+    for (const s of Object.values(cfg.sites)) {
+        s.keyword = (s.keyword || "").trim();
+    }
     try {
         const info = await api().SaveConfig(cfg);
-        draft = normalize(info.config);
+        savedConfig = normalize(info.config);
+        draft = clone(savedConfig);
         renderEnv(info);
-        renderRecent(info.config.recentTxt);
-        el("txtPath").textContent = info.config.txtPath || "未选择 txt 文件";
-        el("txtPath").classList.toggle("set", !!info.config.txtPath);
+        renderSettings(draft);
+        markDirty();
         if (!quiet) {
+            toast("设置已保存", "ok");
             el("saveHint").textContent = "已保存 · " + new Date().toLocaleTimeString();
-            el("saveHint").className = "hint";
         }
         if (info.issues && info.issues.length) {
             el("saveHint").textContent = "已保存，但仍有 " + info.issues.length + " 项待处理";
@@ -778,28 +1142,8 @@ async function saveSettings(quiet) {
     } catch (err) {
         el("saveHint").textContent = "保存失败: " + err;
         el("saveHint").className = "hint bad";
+        toast("保存失败: " + err, "error");
     }
-}
-
-/* ---------- 工具 ---------- */
-
-function baseName(p) {
-    const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
-    return i >= 0 ? p.slice(i + 1) : p;
-}
-
-function dirName(p) {
-    const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
-    return i > 0 ? p.slice(0, i) : p;
-}
-
-function escapeHtml(s) {
-    return String(s == null ? "" : s)
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#39;");
 }
 
 document.addEventListener("DOMContentLoaded", boot);

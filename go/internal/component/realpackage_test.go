@@ -1,6 +1,7 @@
 package component
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,7 +42,7 @@ func TestInstallRealPackage(t *testing.T) {
 	if got := m.State(spec); got != Ready {
 		t.Fatalf("状态应为 Ready，实际 %s", got)
 	}
-	if err := m.Verify("scraper"); err != nil {
+	if err := m.Verify(context.Background(), "scraper"); err != nil {
 		t.Fatalf("真实包校验失败: %v", err)
 	}
 

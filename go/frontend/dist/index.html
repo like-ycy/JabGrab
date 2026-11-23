@@ -23,7 +23,7 @@
         </nav>
         <div class="topbar-right">
             <button class="theme-btn" id="btnTheme" type="button" aria-label="跟随系统"></button>
-            <div class="env" id="envBadge">自检中…</div>
+            <button class="env" id="envBadge" type="button" title="环境自检结果">自检中…</button>
         </div>
     </header>
 
@@ -57,7 +57,11 @@
                         <strong id="summaryText">等待开始</strong>
                         <span id="summaryDetail"></span>
                     </div>
-                    <div class="bar big"><i id="overallBar" style="width:0%"></i></div>
+                    <div class="bar big segmented" title="绿=成功 · 红=失败/取消 · 蓝=当前进度">
+                        <i class="seg-ok" id="segOk" style="width:0%"></i>
+                        <i class="seg-bad" id="segBad" style="width:0%"></i>
+                        <i class="seg-cur" id="segCur" style="width:0%"></i>
+                    </div>
                 </div>
             </div>
 
@@ -70,16 +74,14 @@
                                 <th class="col-name">名称 / URL</th>
                                 <th class="col-actor">演员</th>
                                 <th class="col-site">站点</th>
-                                <th class="col-status">状态</th>
-                                <th class="col-progress">进度</th>
+                                <th class="col-state">状态 / 进度</th>
                                 <th class="col-speed">速度</th>
-                                <th class="col-play">播放</th>
-                                <th class="col-reveal">文件夹</th>
+                                <th class="col-actions">操作</th>
                             </tr>
                         </thead>
                         <tbody id="taskBody">
                             <tr class="empty">
-                                <td colspan="9">还没有任务，选择 txt 后点“开始”</td>
+                                <td colspan="7">还没有任务，选择 txt 后点“开始”</td>
                             </tr>
                         </tbody>
                     </table>
@@ -92,7 +94,16 @@
                 <div class="card log-card" id="logPanel">
                     <div class="log-head">
                         <span>运行日志</span>
-                        <button id="btnClearLog" class="ghost">清空</button>
+                        <div class="log-tools">
+                            <div class="log-filters" id="logFilters">
+                                <button class="chip active" data-level="all">全部</button>
+                                <button class="chip" data-level="info">信息</button>
+                                <button class="chip" data-level="warn">警告</button>
+                                <button class="chip" data-level="error">错误</button>
+                            </div>
+                            <input id="logSearch" type="text" placeholder="搜索日志…" />
+                            <button id="btnClearLog" class="ghost">清空</button>
+                        </div>
                     </div>
                     <pre id="log"></pre>
                 </div>
@@ -101,7 +112,15 @@
 
         <!-- 设置页 -->
         <section class="view" id="view-settings">
-            <div class="card">
+            <nav class="settings-nav">
+                <button data-goto="card-paths">路径</button>
+                <button data-goto="card-player">播放</button>
+                <button data-goto="card-components">外部组件</button>
+                <button data-goto="card-sites">站点</button>
+                <button data-goto="card-download">下载参数</button>
+            </nav>
+
+            <div class="card" id="card-paths">
                 <h2>路径</h2>
                 <div class="field">
                     <label>视频保存目录</label>
@@ -142,11 +161,11 @@
                 </div>
             </div>
 
-            <div class="card">
+            <div class="card" id="card-player">
                 <h2>播放</h2>
                 <p class="hint">
                     下载成功后，任务列表每一行右侧会出现「播放」按钮，点它用播放器打开这一条；
-                    旁边的「打开文件夹」直接在访达 / 资源管理器里定位到这个视频。
+                    旁边的「文件夹」直接在访达 / 资源管理器里定位到这个视频。
                 </p>
                 <div class="field">
                     <label>播放器路径（可选）</label>
@@ -159,7 +178,7 @@
                 </div>
             </div>
 
-            <div class="card">
+            <div class="card" id="card-components">
                 <h2>外部组件</h2>
                 <p class="hint">
                     爬取程序与下载器可以独立下载与更新：升级本程序时不必重下这几十 MB，
@@ -186,26 +205,26 @@
                 <div class="hint" id="componentsDir"></div>
             </div>
 
-            <div class="card">
+            <div class="card" id="card-sites">
                 <h2>站点</h2>
                 <p class="hint">只有已启用站点、且 URL 包含其关键字的链接才会被处理。</p>
                 <div id="siteList" class="site-list"></div>
             </div>
 
-            <div class="card">
-                <h2>下载参数</h2>
+            <details class="card details-card" id="card-download">
+                <summary>下载参数</summary>
                 <div class="grid">
                     <div class="field">
                         <label>线程数</label>
-                        <input id="threads" type="number" min="1" max="128" />
+                        <input id="threads" type="number" min="1" max="128" data-fallback="25" />
                     </div>
                     <div class="field">
                         <label>分片重试次数</label>
-                        <input id="retryCount" type="number" min="1" max="200" />
+                        <input id="retryCount" type="number" min="1" max="200" data-fallback="20" />
                     </div>
                     <div class="field">
                         <label>HTTP 超时（秒）</label>
-                        <input id="timeoutSec" type="number" min="5" max="600" />
+                        <input id="timeoutSec" type="number" min="5" max="600" data-fallback="30" />
                     </div>
                     <div class="field">
                         <label>限速（如 15M，留空不限）</label>
@@ -213,7 +232,7 @@
                     </div>
                     <div class="field">
                         <label>爬取超时（秒）</label>
-                        <input id="scrapeTimeoutSec" type="number" min="30" max="900" />
+                        <input id="scrapeTimeoutSec" type="number" min="30" max="900" data-fallback="180" />
                     </div>
                     <div class="field checkbox-field">
                         <label>
@@ -222,16 +241,33 @@
                         </label>
                     </div>
                 </div>
-            </div>
+            </details>
 
-            <div class="save-row">
-                <button id="btnSave" class="primary">保存设置</button>
+            <div class="save-bar" id="saveBar">
                 <span class="hint" id="saveHint"></span>
+                <div class="save-actions">
+                    <button id="btnReset" class="hidden">还原修改</button>
+                    <button id="btnSave" class="primary" disabled>保存设置</button>
+                </div>
             </div>
         </section>
     </main>
 
+    <div class="toasts" id="toasts" aria-live="polite"></div>
+
+    <div class="modal-mask hidden" id="modalMask">
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+            <h3 id="modalTitle"></h3>
+            <p id="modalText"></p>
+            <div class="modal-actions">
+                <button id="btnModalCancel">取消</button>
+                <button id="btnModalOk" class="primary">确定</button>
+            </div>
+        </div>
+    </div>
+
     <script src="theme.js"></script>
+    <script src="pure.js"></script>
     <script src="app.js"></script>
 </body>
 

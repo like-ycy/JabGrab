@@ -207,28 +207,6 @@ func TestRunFailsWithoutFFmpeg(t *testing.T) {
 	}
 }
 
-// stdout 与 stderr 各一个协程写同一个 ring，必须在 -race 下无告警。
-func TestRingConcurrentPush(t *testing.T) {
-	r := &ring{limit: 8}
-	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < 200; j++ {
-				r.push("line")
-			}
-		}()
-	}
-	wg.Wait()
-	if n := len(r.buf); n != 8 {
-		t.Fatalf("ring 应保持 limit 条，实际 %d", n)
-	}
-	if r.summary() == "" {
-		t.Fatal("摘要不该为空")
-	}
-}
-
 // 下载器必须在保存目录里运行：Finder 启动的 .app 的 cwd 是 /（不可写），
 // 只给 --save-dir 不够，临时分片仍会被写到不可写的位置。
 func TestRunUsesSaveDirAsWorkDir(t *testing.T) {
