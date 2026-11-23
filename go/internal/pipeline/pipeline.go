@@ -390,9 +390,12 @@ func (r *Runner) downloadPhase(
 	r.logf("info", fmt.Sprintf("[%d/%d] 下载 %s → %s", idx+1, total, name, res.M3U8URL))
 
 	// 先落「下载中」标记再启动：中断后标记还在，同名非空文件就会被判为残件
-	// 而不是成品（见 completedVideo）。写失败只降级为旧行为，不拦下载。
+	// 而不是成品（见 completedVideo）。演员目录首次下载时还不存在（此前由下载器
+	// 启动时才创建），先补建目录再写；建目录或写标记失败只降级为旧行为，不拦下载。
 	marker := partMarkerPath(saveDir, name)
-	if err := os.WriteFile(marker, []byte(res.M3U8URL), 0o644); err != nil {
+	if err := os.MkdirAll(saveDir, 0o755); err != nil {
+		r.logf("warn", fmt.Sprintf("[%d/%d] 创建保存目录失败: %v", idx+1, total, err))
+	} else if err := os.WriteFile(marker, []byte(res.M3U8URL), 0o644); err != nil {
 		r.logf("warn", fmt.Sprintf("[%d/%d] 写入下载标记失败（不影响下载）: %v", idx+1, total, err))
 	}
 
