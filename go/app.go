@@ -13,6 +13,7 @@ import (
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
+	"jabgrab/internal/appearance"
 	"jabgrab/internal/config"
 	"jabgrab/internal/locate"
 	"jabgrab/internal/pipeline"
@@ -351,6 +352,13 @@ func (a *App) State() pipeline.State {
 		return pipeline.State{}
 	}
 	return runner.Snapshot()
+}
+
+// GetSystemAppearance 返回操作系统当前外观："dark"、"light"。
+// macOS 上 WKWebView 的 prefers-color-scheme 会误报，前端「跟随系统」以这里为准；
+// 其它平台返回空串，表示让前端回退 media query。
+func (a *App) GetSystemAppearance() string {
+	return appearance.Get()
 }
 
 // dlrVersion 取下载器版本（带缓存，避免每次刷新都拉一次进程）。

@@ -1,15 +1,64 @@
+/* 亮暗两套设计 token，取值与 video_cut 的 xwang-ui 主题一致；
+   暗色靠 html.dark 覆盖同名变量，组件规则只引用变量，不写死颜色。 */
 :root {
-    --bg: #f6f7fa;
-    --card: #ffffff;
-    --border: #e3e6ee;
-    --text: #1c2230;
-    --muted: #6b7488;
-    --accent: #2563eb;
-    --accent-soft: #e8efff;
-    --ok: #118a5b;
-    --warn: #b26a00;
-    --err: #c0392b;
+    color-scheme: light;
+    --color-background: #f7f8fa;
+    --color-surface: #ffffff;
+    --color-surface-2: #f2f3f5;
+    --color-surface-3: #e5e6eb;
+    --color-foreground: #1d2129;
+    --color-muted: #4e5969;
+    --color-faint: #86909c;
+    --color-border: #e5e6eb;
+    --color-border-strong: #c9cdd4;
+    --color-primary: #165dff;
+    --color-primary-hover: #4080ff;
+    --color-primary-active: #0e42d2;
+    --color-primary-soft: #e8f3ff;
+    --color-success: #00b42a;
+    --color-success-soft: #e8ffea;
+    --color-warning: #ff7d00;
+    --color-warning-soft: #fff7e8;
+    --color-danger: #f53f3f;
+    --color-danger-soft: #ffece8;
+    --color-info: #0e42d2;
+    --color-info-soft: #e8f3ff;
+    --color-on-primary: #ffffff;
+
+    /* 由 token 派生的局部色：亮色下橙色当正文太浅，压暗一档 */
+    --text-warning: color-mix(in srgb, var(--color-warning) 62%, #000);
+    --border-warning: color-mix(in srgb, var(--color-warning) 32%, transparent);
+    --border-danger: color-mix(in srgb, var(--color-danger) 28%, transparent);
+    --border-primary: color-mix(in srgb, var(--color-primary) 32%, transparent);
+    --row-border: color-mix(in srgb, var(--color-border) 55%, transparent);
     --radius: 12px;
+}
+
+html.dark {
+    color-scheme: dark;
+    --color-background: #0b0d10;
+    --color-surface: #151a22;
+    --color-surface-2: #1d2633;
+    --color-surface-3: #263241;
+    --color-foreground: #f2f3f5;
+    --color-muted: #c9cdd4;
+    --color-faint: #86909c;
+    --color-border: #2a3441;
+    --color-border-strong: #3b4756;
+    --color-primary: #4080ff;
+    --color-primary-hover: #6aa1ff;
+    --color-primary-active: #165dff;
+    --color-primary-soft: #172c4a;
+    --color-success: #23c343;
+    --color-success-soft: #12351f;
+    --color-warning: #ffaa2c;
+    --color-warning-soft: #3a2914;
+    --color-danger: #f76969;
+    --color-danger-soft: #3b1e20;
+    --color-info: #4080ff;
+    --color-info-soft: #172c4a;
+    --color-on-primary: #ffffff;
+    --text-warning: var(--color-warning);
 }
 
 * {
@@ -23,12 +72,13 @@ body {
 }
 
 body {
-    background: var(--bg);
-    color: var(--text);
+    background: var(--color-background);
+    color: var(--color-foreground);
     font: 13px/1.55 -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", sans-serif;
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    transition: background-color .18s ease, color .18s ease;
 }
 
 /* ---------- 顶栏 ---------- */
@@ -39,8 +89,9 @@ body {
     align-items: center;
     gap: 18px;
     padding: 0 16px;
-    background: var(--card);
-    border-bottom: 1px solid var(--border);
+    background: var(--color-surface);
+    border-bottom: 1px solid var(--color-border);
+    transition: background-color .18s ease, border-color .18s ease;
 }
 
 .brand {
@@ -55,8 +106,8 @@ body {
     width: 24px;
     height: 24px;
     border-radius: 7px;
-    background: var(--accent);
-    color: #fff;
+    background: var(--color-primary);
+    color: var(--color-on-primary);
     font-size: 11px;
     font-weight: 700;
     display: grid;
@@ -72,7 +123,7 @@ body {
 .tab {
     border: 0;
     background: transparent;
-    color: var(--muted);
+    color: var(--color-muted);
     padding: 6px 14px;
     border-radius: 8px;
     cursor: pointer;
@@ -80,18 +131,50 @@ body {
 }
 
 .tab:hover {
-    background: #f0f2f7;
+    background: var(--color-surface-2);
 }
 
 .tab.active {
-    background: var(--accent-soft);
-    color: var(--accent);
+    background: var(--color-primary-soft);
+    color: var(--color-primary);
     font-weight: 600;
+}
+
+.topbar-right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 0 0 auto;
+}
+
+/* 主题按钮：图标与 video_cut 相同（太阳 / 月亮 / 显示器） */
+.theme-btn {
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border-radius: 8px;
+    border-color: transparent;
+    background: transparent;
+    color: var(--color-muted);
+}
+
+.theme-btn:hover:not(:disabled) {
+    background: var(--color-surface-2);
+    border-color: transparent;
+    color: var(--color-foreground);
+}
+
+.theme-btn svg {
+    width: 16px;
+    height: 16px;
+    display: block;
 }
 
 .env {
     font-size: 12px;
-    color: var(--muted);
+    color: var(--color-muted);
     max-width: 320px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -99,11 +182,11 @@ body {
 }
 
 .env.ok {
-    color: var(--ok);
+    color: var(--color-success);
 }
 
 .env.bad {
-    color: var(--err);
+    color: var(--color-danger);
 }
 
 /* ---------- 布局 ---------- */
@@ -112,9 +195,9 @@ body {
     margin: 10px 16px 0;
     padding: 9px 12px;
     border-radius: 10px;
-    background: #fff6e5;
-    border: 1px solid #f3ddb0;
-    color: #8a5b00;
+    background: var(--color-warning-soft);
+    border: 1px solid var(--border-warning);
+    color: var(--text-warning);
     font-size: 12px;
     line-height: 1.7;
     white-space: pre-wrap;
@@ -143,17 +226,18 @@ main {
 }
 
 .card {
-    background: var(--card);
-    border: 1px solid var(--border);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
     border-radius: var(--radius);
     padding: 14px 16px;
+    transition: background-color .18s ease, border-color .18s ease;
 }
 
 .card h2 {
     margin: 0 0 12px;
     font-size: 13px;
     font-weight: 600;
-    color: var(--muted);
+    color: var(--color-muted);
     letter-spacing: .02em;
 }
 
@@ -164,17 +248,17 @@ main {
 /* ---------- 按钮 ---------- */
 button {
     font: inherit;
-    border: 1px solid var(--border);
-    background: var(--card);
-    color: var(--text);
+    border: 1px solid var(--color-border);
+    background: var(--color-surface);
+    color: var(--color-foreground);
     padding: 6px 14px;
     border-radius: 8px;
     cursor: pointer;
-    transition: background .12s, border-color .12s;
+    transition: background .12s, border-color .12s, color .12s;
 }
 
 button:hover:not(:disabled) {
-    background: #f3f5f9;
+    background: var(--color-surface-2);
 }
 
 button:disabled {
@@ -183,29 +267,30 @@ button:disabled {
 }
 
 button.primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
+    background: var(--color-primary);
+    border-color: var(--color-primary);
+    color: var(--color-on-primary);
     font-weight: 500;
 }
 
 button.primary:hover:not(:disabled) {
-    background: #1d55d0;
+    background: var(--color-primary-hover);
+    border-color: var(--color-primary-hover);
 }
 
 button.danger {
-    color: var(--err);
-    border-color: #f0cfca;
+    color: var(--color-danger);
+    border-color: var(--border-danger);
 }
 
 button.danger:hover:not(:disabled) {
-    background: #fdf1ef;
+    background: var(--color-danger-soft);
 }
 
 button.ghost {
     border: 0;
     background: transparent;
-    color: var(--muted);
+    color: var(--color-muted);
     padding: 2px 8px;
 }
 
@@ -224,25 +309,25 @@ button.ghost {
 .path-box label {
     display: block;
     font-size: 12px;
-    color: var(--muted);
+    color: var(--color-muted);
     margin-bottom: 4px;
 }
 
 .path {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 12px;
-    background: #f7f8fb;
-    border: 1px solid var(--border);
+    background: var(--color-surface-2);
+    border: 1px solid var(--color-border);
     border-radius: 8px;
     padding: 7px 10px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    color: var(--muted);
+    color: var(--color-muted);
 }
 
 .path.set {
-    color: var(--text);
+    color: var(--color-foreground);
 }
 
 .actions {
@@ -263,17 +348,17 @@ button.ghost {
     align-items: baseline;
     gap: 10px;
     font-size: 12px;
-    color: var(--muted);
+    color: var(--color-muted);
 }
 
 .overall-text strong {
-    color: var(--text);
+    color: var(--color-foreground);
     font-size: 13px;
 }
 
 .bar {
     height: 6px;
-    background: #eef0f5;
+    background: var(--color-surface-3);
     border-radius: 99px;
     overflow: hidden;
 }
@@ -286,7 +371,7 @@ button.ghost {
     display: block;
     height: 100%;
     width: 0;
-    background: var(--accent);
+    background: var(--color-primary);
     border-radius: 99px;
     transition: width .2s;
 }
@@ -326,13 +411,13 @@ button.ghost {
     width: 42px;
     height: 3px;
     border-radius: 3px;
-    background: var(--border);
+    background: var(--color-border);
 }
 
 .pane-divider:hover::after,
 .pane-divider:focus-visible::after,
 body.resizing .pane-divider::after {
-    background: var(--accent);
+    background: var(--color-primary);
 }
 
 body.resizing,
@@ -351,7 +436,7 @@ body.resizing * {
 .task-table thead th {
     position: sticky;
     top: 0;
-    background: var(--card);
+    background: var(--color-surface);
     z-index: 1;
 }
 
@@ -364,15 +449,15 @@ body.resizing * {
 .task-table th {
     text-align: left;
     font-weight: 500;
-    color: var(--muted);
+    color: var(--color-muted);
     padding: 8px 12px;
-    border-bottom: 1px solid var(--border);
+    border-bottom: 1px solid var(--color-border);
     white-space: nowrap;
 }
 
 .task-table td {
     padding: 8px 12px;
-    border-bottom: 1px solid #f2f4f8;
+    border-bottom: 1px solid var(--row-border);
     vertical-align: middle;
 }
 
@@ -382,13 +467,13 @@ body.resizing * {
 
 .task-table tr.empty td {
     text-align: center;
-    color: var(--muted);
+    color: var(--color-muted);
     padding: 26px 0;
 }
 
 .col-idx {
     width: 40px;
-    color: var(--muted);
+    color: var(--color-muted);
 }
 
 .col-actor {
@@ -430,14 +515,14 @@ body.resizing * {
 .play-btn {
     padding: 3px 9px;
     font-size: 11px;
-    border: 1px solid var(--border);
-    color: var(--accent);
+    border: 1px solid var(--color-border);
+    color: var(--color-primary);
     white-space: nowrap;
 }
 
 .play-btn:hover:not(:disabled) {
-    background: var(--accent-soft);
-    border-color: #cfdcff;
+    background: var(--color-primary-soft);
+    border-color: var(--border-primary);
 }
 
 .cell-name {
@@ -452,7 +537,7 @@ body.resizing * {
 }
 
 .cell-name .url {
-    color: var(--muted);
+    color: var(--color-muted);
     font-size: 11px;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     overflow: hidden;
@@ -466,35 +551,36 @@ body.resizing * {
     padding: 1px 8px;
     border-radius: 99px;
     font-size: 11px;
-    background: #f0f2f7;
-    color: var(--muted);
+    background: var(--color-surface-2);
+    color: var(--color-muted);
     white-space: nowrap;
 }
 
 .tag.scraping,
 .tag.downloading {
-    background: var(--accent-soft);
-    color: var(--accent);
+    background: var(--color-primary-soft);
+    color: var(--color-primary);
 }
 
 .tag.done {
-    background: #e6f6ef;
-    color: var(--ok);
+    background: var(--color-success-soft);
+    color: var(--color-success);
 }
 
 .tag.failed {
-    background: #fdecea;
-    color: var(--err);
+    background: var(--color-danger-soft);
+    color: var(--color-danger);
 }
 
+/* 已跳过：暗色下 primary 与 info 同色，用中性底 + info 字跟「下载中」区分开 */
 .tag.skipped {
-    background: #f1f0fb;
-    color: #5a4bbd;
+    background: var(--color-surface-3);
+    color: var(--color-info);
 }
 
 .tag.cancelled {
-    background: #f2f3f6;
-    color: #8b93a5;
+    background: var(--color-surface-2);
+    color: var(--color-faint);
 }
 
 .progress-cell {
@@ -506,18 +592,18 @@ body.resizing * {
 .progress-meta {
     display: flex;
     justify-content: space-between;
-    color: var(--muted);
+    color: var(--color-muted);
     font-size: 11px;
 }
 
 .speed-cell {
     text-align: right;
-    color: var(--muted);
+    color: var(--color-muted);
     font-size: 11px;
 }
 
 .row-failed .cell-name .name {
-    color: var(--err);
+    color: var(--color-danger);
 }
 
 /* ---------- 日志 ---------- */
@@ -537,8 +623,8 @@ body.resizing * {
     flex: 0 0 auto;
     padding: 0 12px 6px;
     font-size: 12px;
-    color: var(--muted);
-    border-bottom: 1px solid var(--border);
+    color: var(--color-muted);
+    border-bottom: 1px solid var(--color-border);
 }
 
 #log {
@@ -550,22 +636,22 @@ body.resizing * {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 11px;
     line-height: 1.65;
-    color: #384054;
+    color: var(--color-muted);
     flex: 1 1 auto;
     white-space: pre-wrap;
     word-break: break-all;
 }
 
 #log .l-error {
-    color: var(--err);
+    color: var(--color-danger);
 }
 
 #log .l-warn {
-    color: var(--warn);
+    color: var(--text-warning);
 }
 
 #log .l-debug {
-    color: #98a0b3;
+    color: var(--color-faint);
 }
 
 /* ---------- 设置页 ---------- */
@@ -580,7 +666,7 @@ body.resizing * {
 .field>label {
     display: block;
     font-size: 12px;
-    color: var(--muted);
+    color: var(--color-muted);
     margin-bottom: 5px;
 }
 
@@ -594,27 +680,27 @@ input[type="number"] {
     flex: 1 1 auto;
     font: inherit;
     padding: 7px 10px;
-    border: 1px solid var(--border);
+    border: 1px solid var(--color-border);
     border-radius: 8px;
-    background: #fbfcfe;
-    color: var(--text);
+    background: var(--color-surface-2);
+    color: var(--color-foreground);
     min-width: 0;
 }
 
 input[type="text"]:focus,
 input[type="number"]:focus {
-    outline: 2px solid var(--accent-soft);
-    border-color: var(--accent);
+    outline: 2px solid var(--color-primary-soft);
+    border-color: var(--color-primary);
 }
 
 .hint {
     font-size: 11px;
-    color: var(--muted);
+    color: var(--color-muted);
     margin-top: 5px;
 }
 
 .hint.bad {
-    color: var(--err);
+    color: var(--color-danger);
 }
 
 .recent {
@@ -627,7 +713,7 @@ input[type="number"]:focus {
 .recent button {
     font-size: 11px;
     padding: 3px 9px;
-    color: var(--muted);
+    color: var(--color-muted);
 }
 
 .grid {
@@ -653,7 +739,7 @@ input[type="number"]:focus {
     align-items: center;
     gap: 7px;
     font-size: 12px;
-    color: var(--text);
+    color: var(--color-foreground);
     cursor: pointer;
 }
 
@@ -668,9 +754,9 @@ input[type="number"]:focus {
     align-items: center;
     gap: 12px;
     padding: 9px 12px;
-    border: 1px solid var(--border);
+    border: 1px solid var(--color-border);
     border-radius: 10px;
-    background: #fbfcfe;
+    background: var(--color-surface-2);
 }
 
 .site-row.off {
@@ -688,7 +774,7 @@ input[type="number"]:focus {
     gap: 6px;
     flex: 1 1 auto;
     font-size: 12px;
-    color: var(--muted);
+    color: var(--color-muted);
 }
 
 .site-row .kw input {
@@ -709,15 +795,19 @@ input[type="number"]:focus {
 }
 
 ::-webkit-scrollbar-thumb {
-    background: #d5d9e3;
+    background: var(--color-border-strong);
     border-radius: 99px;
     border: 3px solid transparent;
     background-clip: content-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-    background: #c2c8d6;
+    background: var(--color-faint);
     background-clip: content-box;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
 }
 
 /* ---------- 外部组件 ---------- */
@@ -729,10 +819,10 @@ input[type="number"]:focus {
 }
 
 .comp {
-    border: 1px solid var(--border);
+    border: 1px solid var(--color-border);
     border-radius: 10px;
     padding: 10px 12px;
-    background: #fcfdff;
+    background: var(--color-surface-2);
 }
 
 .comp-head {
@@ -742,14 +832,14 @@ input[type="number"]:focus {
 }
 
 .comp-meta {
-    color: var(--muted);
+    color: var(--color-muted);
     font-size: 11px;
     margin-top: 3px;
 }
 
 /* 生效路径可能很长（Windows 上尤甚），单行省略，靠 title 看全 */
 .comp-path {
-    color: var(--muted);
+    color: var(--color-muted);
     font-size: 11px;
     margin-top: 3px;
     overflow: hidden;
@@ -774,7 +864,7 @@ button.link {
     border: none;
     padding: 0;
     margin-left: 8px;
-    color: var(--accent);
+    color: var(--color-primary);
     font-size: 12px;
     text-decoration: underline;
     cursor: pointer;

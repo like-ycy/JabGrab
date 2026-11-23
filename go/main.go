@@ -21,13 +21,15 @@ func main() {
 
 	app := NewApp()
 
+	// BackgroundColour 是 WebView 加载前的占位底色（亮色背景 token）；
+	// 亮/暗切换本身由前端 CSS 负责，切主题时会同步原生窗口底色。
 	err := wails.Run(&options.App{
 		Title:            "JabGrab",
 		Width:            1000,
 		Height:           720,
 		MinWidth:         900,
 		MinHeight:        600,
-		BackgroundColour: &options.RGBA{R: 246, G: 247, B: 250, A: 1},
+		BackgroundColour: &options.RGBA{R: 247, G: 248, B: 250, A: 1},
 		AssetServer:      &assetserver.Options{Assets: assets},
 		OnStartup:        app.startup,
 		OnShutdown:       app.shutdown,

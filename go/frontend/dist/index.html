@@ -4,7 +4,24 @@
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
     <title>JabGrab</title>
+    <script>
+        /* 首帧前套用主题，避免暗色下先闪一帧白底；细节（跟随系统、原生底色）交给 theme.js。 */
+        (function () {
+            try {
+                var pref = localStorage.getItem("jabgrab-theme");
+                if (pref !== "light" && pref !== "dark") pref = "system";
+                var dark = pref === "dark" ||
+                    (pref === "system" && window.matchMedia &&
+                        window.matchMedia("(prefers-color-scheme: dark)").matches);
+                document.documentElement.classList.toggle("dark", dark);
+                document.documentElement.style.colorScheme = dark ? "dark" : "light";
+            } catch (e) {
+                /* 隐私模式下读不到 localStorage，用亮色照常渲染 */
+            }
+        })();
+    </script>
     <link rel="stylesheet" href="style.css" />
 </head>
 
@@ -18,7 +35,10 @@
             <button class="tab active" data-view="tasks">任务</button>
             <button class="tab" data-view="settings">设置</button>
         </nav>
-        <div class="env" id="envBadge">自检中…</div>
+        <div class="topbar-right">
+            <button class="theme-btn" id="btnTheme" type="button" aria-label="跟随系统"></button>
+            <div class="env" id="envBadge">自检中…</div>
+        </div>
     </header>
 
     <div class="banner hidden" id="issueBanner"></div>
@@ -223,6 +243,7 @@
         </section>
     </main>
 
+    <script src="theme.js"></script>
     <script src="app.js"></script>
 </body>
 
