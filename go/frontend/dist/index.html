@@ -6,22 +6,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
     <title>JabGrab</title>
-    <script>
-        /* 首帧前套用主题，避免暗色下先闪一帧白底；细节（跟随系统、原生底色）交给 theme.js。 */
-        (function () {
-            try {
-                var pref = localStorage.getItem("jabgrab-theme");
-                if (pref !== "light" && pref !== "dark") pref = "system";
-                var dark = pref === "dark" ||
-                    (pref === "system" && window.matchMedia &&
-                        window.matchMedia("(prefers-color-scheme: dark)").matches);
-                document.documentElement.classList.toggle("dark", dark);
-                document.documentElement.style.colorScheme = dark ? "dark" : "light";
-            } catch (e) {
-                /* 隐私模式下读不到 localStorage，用亮色照常渲染 */
-            }
-        })();
-    </script>
+    <!-- 首帧前套用主题，避免暗色下先闪一帧白底；放外部文件是为了将来加严格 CSP 也不会被拦 -->
+    <script src="theme-boot.js"></script>
     <link rel="stylesheet" href="style.css" />
 </head>
 
