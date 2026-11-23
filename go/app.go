@@ -482,6 +482,10 @@ func (a *App) probeDlrVersion(bin string) {
 		return
 	}
 	v := strings.TrimSpace(strings.SplitN(string(out), "\n", 2)[0])
+	// N_m3u8DL-RE 输出形如 "0.6.0+<commit hash>"，界面上只留版本号。
+	if i := strings.IndexByte(v, '+'); i >= 0 {
+		v = v[:i]
+	}
 	if len(v) > 120 {
 		v = v[:120]
 	}
