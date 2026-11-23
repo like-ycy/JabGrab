@@ -19,6 +19,7 @@ import (
 	"jabgrab/internal/pipeline"
 	"jabgrab/internal/player"
 	"jabgrab/internal/proc"
+	"jabgrab/internal/reveal"
 )
 
 // LogLine 是推给前端的一行日志。
@@ -246,6 +247,14 @@ func (a *App) PlayFile(path string) error {
 	a.mu.Unlock()
 
 	return player.Open(playerPath, path)
+}
+
+// RevealFile 在系统文件管理器里打开成品视频所在的目录（列表里每行的「打开文件夹」）。
+//
+// macOS 打开访达并选中这一条，Windows 打开资源管理器；成品被手动删掉时退化成
+// 只打开目录，不报「找不到」——那时用户正想去看那个目录里还剩什么。
+func (a *App) RevealFile(path string) error {
+	return reveal.Dir(path)
 }
 
 // Start 启动流水线，立即返回，进度通过事件推送。

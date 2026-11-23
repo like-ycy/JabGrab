@@ -444,6 +444,9 @@ body.resizing * {
     width: 100%;
     border-collapse: collapse;
     font-size: 12px;
+    /* 固定布局：列宽只认 th 上的 width，名称列拿剩下的。
+       自动布局会按内容撑，长标题一出现就把进度列压成四行、还会顶出横向滚动条。 */
+    table-layout: fixed;
 }
 
 .task-table th {
@@ -459,6 +462,9 @@ body.resizing * {
     padding: 8px 12px;
     border-bottom: 1px solid var(--row-border);
     vertical-align: middle;
+    /* 固定布局下内容超宽不会再把列撑开，而是直接画到隔壁列上；
+       裁掉比叠字好。列内的块（名称 / 演员）自己带省略号，这里只兜底。 */
+    overflow: hidden;
 }
 
 .task-table tr:last-child td {
@@ -477,13 +483,13 @@ body.resizing * {
 }
 
 .col-actor {
-    width: 132px;
+    width: 120px;
 }
 
 /* 演员名可能是一串（合辑），限制宽度后省略，完整名单放 title 里看。 */
 .cell-actor .actor {
     display: block;
-    max-width: 132px;
+    max-width: 96px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -494,41 +500,59 @@ body.resizing * {
 }
 
 .col-status {
-    width: 84px;
+    width: 78px;
 }
 
 .col-progress {
-    width: 168px;
+    width: 156px;
 }
 
 .col-speed {
-    width: 96px;
+    width: 92px;
     text-align: right;
 }
 
-/* 播放按钮列：只在成品存在时才有内容，宽度固定，避免状态刷新时列表左右跳。 */
+/* 播放 / 打开文件夹按钮列：只在成品存在时才有内容，宽度固定，避免状态刷新时列表左右跳。 */
 .col-play {
-    width: 78px;
+    width: 74px;
     text-align: right;
 }
 
-.play-btn {
+/* 「打开文件夹」比「播放」宽一点（五个字），但仍按内容收窄，别把名称列挤没了。 */
+.col-reveal {
+    width: 92px;
+    text-align: right;
+}
+
+.play-btn,
+.reveal-btn {
     padding: 3px 9px;
     font-size: 11px;
     border: 1px solid var(--color-border);
-    color: var(--color-primary);
     white-space: nowrap;
 }
 
-.play-btn:hover:not(:disabled) {
+.play-btn {
+    color: var(--color-primary);
+}
+
+/* 打开文件夹是次要动作：常态压低，指上去再提亮。 */
+.reveal-btn {
+    padding: 3px 8px;
+    color: var(--color-muted);
+}
+
+.play-btn:hover:not(:disabled),
+.reveal-btn:hover:not(:disabled) {
     background: var(--color-primary-soft);
     border-color: var(--border-primary);
 }
 
-.cell-name {
-    max-width: 320px;
+.reveal-btn:hover:not(:disabled) {
+    color: var(--color-primary);
 }
 
+/* 名称 / URL 列不给宽度：固定布局下它吃掉剩下的那一份，块自己带省略号。 */
 .cell-name .name {
     font-weight: 500;
     overflow: hidden;
@@ -594,6 +618,9 @@ body.resizing * {
     justify-content: space-between;
     color: var(--color-muted);
     font-size: 11px;
+    /* 「1.2 GB」这种带空格的片段被拆开时很难看，整行不换行，宁可窄了截断。 */
+    white-space: nowrap;
+    overflow: hidden;
 }
 
 .speed-cell {

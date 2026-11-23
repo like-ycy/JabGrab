@@ -225,7 +225,7 @@ function renderState(s) {
     const body = el("taskBody");
 
     if (items.length === 0) {
-        body.innerHTML = '<tr class="empty"><td colspan="8">没有可处理的任务，请选择 txt 并确认已启用站点</td></tr>';
+        body.innerHTML = '<tr class="empty"><td colspan="9">没有可处理的任务，请选择 txt 并确认已启用站点</td></tr>';
         setOverall(0);
         el("summaryText").textContent = "等待开始";
         el("summaryDetail").textContent = "";
@@ -258,6 +258,10 @@ function renderState(s) {
             ? `<button class="play-btn" data-play="${escapeHtml(it.path)}"
                        title="播放 ${escapeHtml(it.path)}">▶ 播放</button>`
             : "";
+        const revealCell = it.path
+            ? `<button class="reveal-btn" data-reveal="${escapeHtml(it.path)}"
+                       title="打开 ${escapeHtml(dirName(it.path))}">打开文件夹</button>`
+            : "";
 
         // 演员名在爬取完成后才有；取不到时留占位符，避免整列空白看不出区别。
         const actors = Array.isArray(it.actors) ? it.actors.filter(Boolean) : [];
@@ -278,6 +282,7 @@ function renderState(s) {
             <td class="col-progress">${progress}</td>
             <td class="col-speed speed-cell">${escapeHtml(speed)}</td>
             <td class="col-play">${playCell}</td>
+            <td class="col-reveal">${revealCell}</td>
         </tr>`;
     });
 
@@ -328,13 +333,18 @@ function setRunning(running) {
     el("btnPrune").disabled = running;
 }
 
-/* ---------- 播放 ---------- */
+/* ---------- 播放 / 打开文件夹 ---------- */
 
 // 列表每次状态更新都重建 innerHTML，按钮是一次性的，所以用事件委托绑一次。
 function bindTaskActions() {
     el("taskBody").addEventListener("click", (event) => {
-        const btn = event.target.closest("[data-play]");
-        if (btn) playFile(btn.dataset.play);
+        const play = event.target.closest("[data-play]");
+        if (play) {
+            playFile(play.dataset.play);
+            return;
+        }
+        const reveal = event.target.closest("[data-reveal]");
+        if (reveal) revealFile(reveal.dataset.reveal);
     });
 }
 
@@ -345,6 +355,16 @@ async function playFile(path) {
         appendLog({ level: "info", text: `已交给播放器：${baseName(path)}` });
     } catch (err) {
         appendLog({ level: "error", text: "播放失败: " + err });
+    }
+}
+
+async function revealFile(path) {
+    if (!api()) return;
+    try {
+        await api().RevealFile(path);
+        appendLog({ level: "info", text: `已打开所在目录：${dirName(path)}` });
+    } catch (err) {
+        appendLog({ level: "error", text: "打开文件夹失败: " + err });
     }
 }
 
@@ -766,6 +786,11 @@ async function saveSettings(quiet) {
 function baseName(p) {
     const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
     return i >= 0 ? p.slice(i + 1) : p;
+}
+
+function dirName(p) {
+    const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+    return i > 0 ? p.slice(0, i) : p;
 }
 
 function escapeHtml(s) {
