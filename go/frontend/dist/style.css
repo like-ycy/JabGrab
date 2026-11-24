@@ -1,31 +1,10 @@
-/* 亮暗两套设计 token，取值与 video_cut 的 xwang-ui 主题一致；
-   暗色靠 html.dark 覆盖同名变量，组件规则只引用变量，不写死颜色。 */
+/* grabber 本地的几何量与派生色。
+   颜色 / 圆角 / 阴影 / 字体 / 动效的全部取值来自 tokens.css（xwang-ui 生成物，
+   入口在 index.html，必须排在本文件之前）；本文件只放这个应用自己的东西，
+   且一律从 xwang-ui token 派生，不写死色值。 */
 :root {
-    color-scheme: light;
-    --color-background: #f7f8fa;
-    --color-surface: #ffffff;
-    --color-surface-2: #f2f3f5;
-    --color-surface-3: #e5e6eb;
-    --color-foreground: #1d2129;
-    --color-muted: #4e5969;
-    --color-faint: #86909c;
-    --color-border: #e5e6eb;
-    --color-border-strong: #c9cdd4;
-    --color-primary: #165dff;
-    --color-primary-hover: #4080ff;
-    --color-primary-active: #0e42d2;
-    --color-primary-soft: #e8f3ff;
-    --color-success: #00b42a;
-    --color-success-soft: #e8ffea;
-    --color-warning: #ff7d00;
-    --color-warning-soft: #fff7e8;
-    --color-danger: #f53f3f;
-    --color-danger-soft: #ffece8;
-    --color-info: #0e42d2;
-    --color-info-soft: #e8f3ff;
-    --color-on-primary: #ffffff;
-
-    /* 由 token 派生的局部色：亮色下橙色当正文太浅，压暗一档 */
+    /* 本地派生，不属于 xwang-ui token。
+       亮色下橙色当正文太浅，压暗一档。 */
     --text-warning: color-mix(in srgb, var(--color-warning) 62%, #000);
     --border-warning: color-mix(in srgb, var(--color-warning) 32%, transparent);
     --border-danger: color-mix(in srgb, var(--color-danger) 28%, transparent);
@@ -35,29 +14,7 @@
 }
 
 html.dark {
-    color-scheme: dark;
-    --color-background: #0b0d10;
-    --color-surface: #151a22;
-    --color-surface-2: #1d2633;
-    --color-surface-3: #263241;
-    --color-foreground: #f2f3f5;
-    --color-muted: #c9cdd4;
-    --color-faint: #86909c;
-    --color-border: #2a3441;
-    --color-border-strong: #3b4756;
-    --color-primary: #4080ff;
-    --color-primary-hover: #6aa1ff;
-    --color-primary-active: #165dff;
-    --color-primary-soft: #172c4a;
-    --color-success: #23c343;
-    --color-success-soft: #12351f;
-    --color-warning: #ffaa2c;
-    --color-warning-soft: #3a2914;
-    --color-danger: #f76969;
-    --color-danger-soft: #3b1e20;
-    --color-info: #4080ff;
-    --color-info-soft: #172c4a;
-    --color-on-primary: #ffffff;
+    /* 暗色下 --color-warning 本身已经够亮，直接用 */
     --text-warning: var(--color-warning);
 }
 

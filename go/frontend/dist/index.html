@@ -8,6 +8,10 @@
     <title>JabGrab</title>
     <!-- 首帧前套用主题，避免暗色下先闪一帧白底；放外部文件是为了将来加严格 CSP 也不会被拦 -->
     <script src="theme-boot.js"></script>
+    <!-- tokens.css 是 scripts/sync-tokens.sh 从 xwang-ui 生成的，勿手改。
+         必须排在 style.css 之前：两者都在 :root 定义变量，后者要能读到前者。
+         不用 base.css —— 本页有自己的 reset 与 body 排版，避免两套规则打架。 -->
+    <link rel="stylesheet" href="tokens.css" />
     <link rel="stylesheet" href="style.css" />
 </head>
 
