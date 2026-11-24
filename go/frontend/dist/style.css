@@ -10,7 +10,8 @@
     --border-danger: color-mix(in srgb, var(--color-danger) 28%, transparent);
     --border-primary: color-mix(in srgb, var(--color-primary) 32%, transparent);
     --row-border: color-mix(in srgb, var(--color-border) 55%, transparent);
-    --radius: 12px;
+    /* 本地派生：设置页保存条贴着底边，阴影要向上投，阶梯里没有这一档 */
+    --shadow-raised-up: 0 -4px 16px color-mix(in srgb, var(--color-foreground) 12%, transparent);
 }
 
 html.dark {
@@ -35,7 +36,8 @@ body {
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    transition: background-color .18s ease, color .18s ease;
+    transition: background-color var(--duration-base) var(--ease-standard),
+        color var(--duration-base) var(--ease-standard);
 }
 
 /* ---------- 顶栏 ---------- */
@@ -48,7 +50,8 @@ body {
     padding: 0 16px;
     background: var(--color-surface);
     border-bottom: 1px solid var(--color-border);
-    transition: background-color .18s ease, border-color .18s ease;
+    transition: background-color var(--duration-base) var(--ease-standard),
+        border-color var(--duration-base) var(--ease-standard);
 }
 
 .brand {
@@ -62,7 +65,7 @@ body {
 .logo {
     width: 24px;
     height: 24px;
-    border-radius: 7px;
+    border-radius: var(--radius-control);
     background: var(--color-primary);
     color: var(--color-on-primary);
     font-size: 11px;
@@ -82,7 +85,7 @@ body {
     background: transparent;
     color: var(--color-muted);
     padding: 6px 14px;
-    border-radius: 8px;
+    border-radius: var(--radius-control);
     cursor: pointer;
     font-size: 13px;
 }
@@ -108,10 +111,10 @@ body {
 .theme-btn {
     display: grid;
     place-items: center;
-    width: 28px;
-    height: 28px;
+    width: var(--control-h-sm);
+    height: var(--control-h-sm);
     padding: 0;
-    border-radius: 8px;
+    border-radius: var(--radius-control);
     border-color: transparent;
     background: transparent;
     color: var(--color-muted);
@@ -151,7 +154,7 @@ body {
     flex: 0 0 auto;
     margin: 10px 16px 0;
     padding: 9px 12px;
-    border-radius: 10px;
+    border-radius: var(--radius-panel);
     background: var(--color-warning-soft);
     border: 1px solid var(--border-warning);
     color: var(--text-warning);
@@ -203,9 +206,10 @@ main {
 .card {
     background: var(--color-surface);
     border: 1px solid var(--color-border);
-    border-radius: var(--radius);
+    border-radius: var(--radius-card);
     padding: 14px 16px;
-    transition: background-color .18s ease, border-color .18s ease;
+    transition: background-color var(--duration-base) var(--ease-standard),
+        border-color var(--duration-base) var(--ease-standard);
 }
 
 .card h2 {
@@ -227,9 +231,11 @@ button {
     background: var(--color-surface);
     color: var(--color-foreground);
     padding: 6px 14px;
-    border-radius: 8px;
+    border-radius: var(--radius-control);
     cursor: pointer;
-    transition: background .12s, border-color .12s, color .12s;
+    transition: background var(--duration-fast) var(--ease-standard),
+        border-color var(--duration-fast) var(--ease-standard),
+        color var(--duration-fast) var(--ease-standard);
 }
 
 button:hover:not(:disabled) {
@@ -293,7 +299,7 @@ button.ghost {
     font-size: 12px;
     background: var(--color-surface-2);
     border: 1px solid var(--color-border);
-    border-radius: 8px;
+    border-radius: var(--radius-control);
     padding: 7px 10px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -334,7 +340,7 @@ button.ghost {
 .bar {
     height: 6px;
     background: var(--color-surface-3);
-    border-radius: 99px;
+    border-radius: var(--radius-pill);
     overflow: hidden;
 }
 
@@ -347,8 +353,8 @@ button.ghost {
     height: 100%;
     width: 0;
     background: var(--color-primary);
-    border-radius: 99px;
-    transition: width .2s;
+    border-radius: var(--radius-pill);
+    transition: width var(--duration-base) var(--ease-out);
 }
 
 /* 总体进度三段式：成功绿 / 失败红 / 当前蓝，一眼看出整轮的健康度 */
@@ -400,14 +406,14 @@ button.ghost {
     touch-action: none;
     display: grid;
     place-items: center;
-    border-radius: 4px;
+    border-radius: var(--radius-control);
 }
 
 .pane-divider::after {
     content: "";
     width: 42px;
     height: 3px;
-    border-radius: 3px;
+    border-radius: var(--radius-pill);
     background: var(--color-border);
 }
 
@@ -522,7 +528,7 @@ body.resizing * {
 button.mini {
     padding: 2px 7px;
     font-size: 11px;
-    border-radius: 6px;
+    border-radius: var(--radius-control);
     white-space: nowrap;
 }
 
@@ -574,7 +580,7 @@ button.mini.danger-text:hover:not(:disabled) {
 .tag {
     display: inline-block;
     padding: 1px 8px;
-    border-radius: 99px;
+    border-radius: var(--radius-pill);
     font-size: 11px;
     background: var(--color-surface-2);
     color: var(--color-muted);
@@ -743,7 +749,7 @@ input[type="number"] {
     font: inherit;
     padding: 7px 10px;
     border: 1px solid var(--color-border);
-    border-radius: 8px;
+    border-radius: var(--radius-control);
     background: var(--color-surface-2);
     color: var(--color-foreground);
     min-width: 0;
@@ -817,7 +823,7 @@ input[type="number"]:focus {
     gap: 12px;
     padding: 9px 12px;
     border: 1px solid var(--color-border);
-    border-radius: 10px;
+    border-radius: var(--radius-panel);
     background: var(--color-surface-2);
 }
 
@@ -851,7 +857,7 @@ input[type="number"]:focus {
 
 ::-webkit-scrollbar-thumb {
     background: var(--color-border-strong);
-    border-radius: 99px;
+    border-radius: var(--radius-pill);
     border: 3px solid transparent;
     background-clip: content-box;
 }
@@ -875,7 +881,7 @@ input[type="number"]:focus {
 
 .comp {
     border: 1px solid var(--color-border);
-    border-radius: 10px;
+    border-radius: var(--radius-panel);
     padding: 10px 12px;
     background: var(--color-surface-2);
 }
@@ -930,7 +936,7 @@ button.env {
     border: 0;
     background: transparent;
     padding: 3px 8px;
-    border-radius: 6px;
+    border-radius: var(--radius-control);
     font-size: 12px;
     color: var(--color-muted);
     max-width: 320px;
@@ -981,7 +987,7 @@ button.chip {
     background: transparent;
     padding: 2px 9px;
     font-size: 11px;
-    border-radius: 99px;
+    border-radius: var(--radius-pill);
     color: var(--color-muted);
 }
 
@@ -1000,7 +1006,7 @@ button.chip.active {
     width: 150px;
     padding: 3px 9px;
     font-size: 11px;
-    border-radius: 99px;
+    border-radius: var(--radius-pill);
 }
 
 #log .filtered {
@@ -1024,14 +1030,15 @@ button.chip.active {
     background: var(--color-surface);
     border: 1px solid var(--color-border);
     border-left: 3px solid var(--color-primary);
-    border-radius: 10px;
+    border-radius: var(--radius-panel);
     padding: 9px 14px;
     font-size: 12px;
     max-width: 340px;
-    box-shadow: 0 6px 24px rgba(0, 0, 0, .18);
+    box-shadow: var(--shadow-card);
     cursor: pointer;
-    animation: toast-in .18s ease;
-    transition: opacity .25s, transform .25s;
+    animation: toast-in var(--duration-base) var(--ease-out);
+    transition: opacity var(--duration-base) var(--ease-out),
+        transform var(--duration-base) var(--ease-out);
 }
 
 .toast.ok {
@@ -1058,7 +1065,7 @@ button.chip.active {
 .modal-mask {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, .45);
+    background: var(--color-overlay);
     display: grid;
     place-items: center;
     z-index: 50;
@@ -1067,10 +1074,10 @@ button.chip.active {
 .modal {
     background: var(--color-surface);
     border: 1px solid var(--color-border);
-    border-radius: 14px;
+    border-radius: var(--radius-dialog);
     padding: 18px 20px;
     width: min(430px, calc(100vw - 48px));
-    box-shadow: 0 12px 40px rgba(0, 0, 0, .25);
+    box-shadow: var(--shadow-dialog);
 }
 
 .modal h3 {
@@ -1116,7 +1123,7 @@ button.chip.active {
 .settings-nav button {
     font-size: 12px;
     padding: 4px 13px;
-    border-radius: 99px;
+    border-radius: var(--radius-pill);
     color: var(--color-muted);
 }
 
@@ -1129,14 +1136,15 @@ button.chip.active {
     gap: 12px;
     background: var(--color-surface);
     border: 1px solid var(--color-border);
-    border-radius: var(--radius);
+    border-radius: var(--radius-card);
     padding: 10px 16px;
-    transition: border-color .15s, box-shadow .15s;
+    transition: border-color var(--duration-fast) var(--ease-standard),
+        box-shadow var(--duration-fast) var(--ease-standard);
 }
 
 .save-bar.dirty {
     border-color: var(--border-primary);
-    box-shadow: 0 -4px 16px rgba(0, 0, 0, .1);
+    box-shadow: var(--shadow-raised-up);
 }
 
 .save-actions {
@@ -1170,7 +1178,7 @@ details.details-card>summary::-webkit-details-marker {
 details.details-card>summary::before {
     content: "▸";
     font-size: 12px;
-    transition: transform .15s;
+    transition: transform var(--duration-fast) var(--ease-standard);
 }
 
 details.details-card[open]>summary::before {
