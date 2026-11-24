@@ -315,6 +315,8 @@ button.ghost {
    拖动条不套整行轮廓，它靠抓手变色提示（见 .pane-divider:focus-visible::after）。 */
 button:focus-visible,
 summary:focus-visible {
+    /* 第一行是兜底：老 WebKit 不认 color-mix 时整条 outline 会失效，焦点就没了 */
+    outline: 2px solid var(--color-primary);
     outline: 2px solid var(--focus-ring);
     outline-offset: 1px;
 }
@@ -817,6 +819,7 @@ input[type="number"]:focus {
 input[type="text"]:focus-visible,
 input[type="number"]:focus-visible {
     /* 输入框自己贴着边框，环画在里面更整齐，也不会被 input-row 的间距挤掉 */
+    outline: 2px solid var(--color-primary);
     outline: 2px solid var(--focus-ring);
     outline-offset: -1px;
 }
