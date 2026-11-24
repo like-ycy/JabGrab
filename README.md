@@ -165,7 +165,10 @@ Windows 用 `pwsh -File scripts\build.ps1 [-Full] [-LegacyFlat] [-SkipPython] [-
 cd go     && go test ./...        # Go：组件安装、配置、下载器解析、定位链、流水线
 cd python && uv run pytest        # Python：站点解析器（不打网络）
 cd python && uv run ruff check    # 静态检查
+node --test go/frontend/tests/pure.test.cjs   # 前端纯函数（要指到文件，Node 22 不接受目录）
 ```
+
+样式侧的额外自查：`scripts/sync-tokens.sh --check`，确认 `tokens.css` 没被手改。
 
 产物级自检（验证「每个组件从哪来」，CI 与本地都跑）：
 
@@ -193,7 +196,7 @@ go/
     reveal/          打开成品所在目录：访达（open -R）/ 资源管理器（ShellExecuteW /select,）
     component/       组件清单、下载、校验、安装、文件锁
     proc/            跨平台子进程（Windows 无黑窗 / UTF-8 输出）
-  frontend/dist/     原生 JS 界面，构建时 embed
+  frontend/dist/     原生 JS 界面 + 由 xwang-ui 生成的 tokens.css，构建时 embed
   third_party/       内置 N_m3u8DL-RE（macOS arm64 / Windows x64）
   cmd/manifestgen/   清单生成工具
 python/
@@ -203,6 +206,54 @@ scripts/             构建、打包、拉取上游二进制
 docs/                发布形态拆分的设计与实测记录
 .github/workflows/   Release 流水线
 ```
+
+## 前端样式与 xwang-ui
+
+界面是原生 JS，没有构建步骤（`go/wails.json` 里 `frontend:build` 是空串，Wails 直接 serve
+`go/frontend/dist`），所以样式也没有打包与预处理。颜色、圆角、阴影、字体、动效这些取值
+和另外几个桌面工具共用一套设计系统 **[xwang-ui](https://github.com/like-ycy/xwang-ui)**。
+
+**分层**
+
+| 文件 | 内容 | 谁能改 |
+|---|---|---|
+| `go/frontend/dist/tokens.css` | xwang-ui 的 `src/tokens.css` 原文（`:root` + `.dark` 两套变量） | **生成物，不要手改** |
+| `go/frontend/dist/style.css` | 组件与业务规则；文件头只有几个本地派生变量 | 手改 |
+| `go/frontend/dist/theme-boot.js` / `theme.js` | 首帧套主题、亮/暗/跟随系统切换 | 手改 |
+
+`index.html` 里 `tokens.css` 必须排在 `style.css` **之前**：后者引用前者定义的变量，
+顺序反了 `style.css` 里的 `:root` 会反压。
+
+`style.css` 顶部那几个变量不属于 xwang-ui，是从 token 派生的：
+
+- `--text-warning`：亮色下橙色当正文太浅，压暗一档；暗色直接用原色
+- `--border-warning` / `--border-danger` / `--border-primary` / `--row-border`：半透明描边
+- `--focus-ring`：焦点环颜色（宽度与偏移是可达性常量，不做 token）
+- `--shadow-raised-up`：设置页保存条的向上阴影，阴影阶梯里没有这一档
+
+没引 xwang-ui 的 `base.css`：本页已有自己的 reset、`body` 排版与滚动条规则，
+两套一起上会互相抢优先级。它里面的 `table { tabular-nums }` 这类兜底，这里按需自己写。
+
+**升级 token**
+
+```bash
+# 1. 改脚本顶部的 TAG（在 xwang-ui 发布新版本之后）
+$EDITOR scripts/sync-tokens.sh          # XWANG_UI_TAG="v0.6.0"
+# 2. 重新生成
+scripts/sync-tokens.sh
+# 3. 看 diff：取值变了就在本机起应用比一眼明暗两套
+git diff go/frontend/dist/tokens.css
+# 4. 平时自查有没有人误改生成物
+scripts/sync-tokens.sh --check          # 有漂移则非零退出
+```
+
+脚本按 **tag** 从 xwang-ui 取源文件（不读它的工作区，避免拿到改到一半的版本），
+头部会写清来源 tag 与 commit。`--check` 只比对注释头之后的内容，所以「生成时间」
+变化不算漂移。
+
+**焦点与动效约定**：所有可聚焦控件用 `:focus-visible` 出 2px 主色环（鼠标点击不出），
+过渡一律走 `--duration-*` / `--ease-*`，主按钮 hover 略升、按下压 1px。改这些之前
+先看一眼 `style.css` 里「焦点可见性」那段注释，避免各写各的。
 
 ## 发布
 
