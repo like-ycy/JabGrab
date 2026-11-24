@@ -69,7 +69,7 @@ brew install ffmpeg
 
 ### 3. 首次运行
 
-1. macOS 解压后把 `JabGrab.app` 拖进「应用程序」；Windows 解压到任意目录后运行 `jabgrab.exe`。
+1. macOS 解压后把 `JabGrab.app` 拖进「应用程序」；Windows 解压到任意目录后运行 `jabgrab.exe`。整包解压出来是一个 `JabGrab/` 目录（内含 `JabGrab.app` 或 `jabgrab.exe` 与 `tools/`），整个目录一起挪走即可。
 2. 打开 **设置** 页，在「外部组件」里下载 `爬取程序` 与 `下载器`（整包已自带，可跳过）。
 3. 选好 **视频保存目录**（默认 `~/Downloads/JabGrab`）和 **待下载 txt**，保存设置。
 4. 回 **任务** 页点「开始」。顶部状态灯会显示本次运行的环境自检结论。

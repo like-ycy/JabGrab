@@ -134,6 +134,22 @@ Windows %APPDATA%\jabgrab\components\scraper-0.1.0\
 **带版本号**，与随包相反：这里要并存「正在跑的旧版」与「刚下的新版」（Windows
 上正在执行的 exe 不能被覆盖），旧版本留到下次启动再清。
 
+### 4.2.1 zip 的顶层结构
+
+上面是 `dist/` 的布局，也就是**解压之后**的布局。整包 zip 在这之外多包一层
+`JabGrab/`，解压出来只有一个目录，不会把 App 与 `tools/` 散在下载目录里：
+
+```
+jabgrab_<ver>_full_<os>_<arch>.zip
+└── JabGrab/
+    ├── JabGrab.app（macOS）/ jabgrab.exe（Windows）
+    └── tools/scraper、tools/dlre
+```
+
+里面的相对位置与 4.1 完全一致，所以 `locate` 不用改。轻量包不套这层：它只有一个
+文件，套层只会让用户多点开一次；同时轻量包里**连空的 `tools/` 目录都不许有**
+（zip 会把空目录也收进去，用户解压后看到空文件夹会以为组件没下全），CI 两步都有断言。
+
 ### 4.3 旧扁平布局继续可用
 
 `locate` 的搜索链里保留「exe 同级 / 同级 bin/ / 同级 python/」三档，所以 v0.3.0

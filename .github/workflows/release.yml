@@ -144,15 +144,26 @@ jobs:
 
           # 反向断言：轻量包里不许有 tools/。默认值被人改回整包时，体积会悄悄
           # 回涨 26MB，而界面上看不出任何差别。
-          if [ -e dist/tools ]; then
-            echo "轻量包里出现了 tools/：" >&2; find dist/tools >&2; exit 1
+          #
+          # 空的 tools/ 单独处理：zip 会把它当条目收进包里，用户解压后看见一个空文件夹，
+          # 只会以为「组件没下全」。它是重组装的残留，删掉即可；非空才是整包内容漏进来。
+          if [ -d dist/tools ]; then
+            if [ -n "$(find dist/tools -mindepth 1 -print -quit)" ]; then
+              echo "轻量包里出现了非空 tools/：" >&2; find dist/tools >&2; exit 1
+            fi
+            echo "    删除残留的空 tools/ 目录"
+            rmdir dist/tools
           fi
 
           PKG="$PWD/jabgrab_${VERSION}_darwin_${{ matrix.goarch }}.zip"
           ( cd dist && zip -qry "$PKG" JabGrab.app )
           # 先落盘再 grep，避免 grep -q 提前退出把 unzip 顶成 SIGPIPE（pipefail 会因此判失败）
-          LIST="$(unzip -l "$PKG")"
-          grep -q 'JabGrab.app/Contents/MacOS/jabgrab' <<<"$LIST"
+          NAMES="$(unzip -Z1 "$PKG")"
+          grep -qx 'JabGrab.app/Contents/MacOS/jabgrab' <<<"$NAMES"
+          # 轻量包解压后只有一个 .app，不带任何 tools/ 条目。
+          if grep -q '^tools/' <<<"$NAMES"; then
+            echo "轻量包 zip 里出现了 tools/：" >&2; grep '^tools/' <<<"$NAMES" | head >&2; exit 1
+          fi
           du -h "$PKG"
 
       - name: 组装并打包整包
@@ -184,7 +195,31 @@ jobs:
           fi
 
           PKG="$PWD/jabgrab_${VERSION}_full_darwin_${{ matrix.goarch }}.zip"
-          ( cd dist && zip -qry "$PKG" JabGrab.app tools )
+          # 解压后必须只有一个顶层目录 JabGrab/，而不是把 .app 与 tools/ 散在解压目录里：
+          # 用户往往直接解压到「下载」或「桌面」，散开的两个大目录既容易和别的文件混在一起，
+          # 也没法整体挪走或删掉。zip 只能按「当前目录下的条目」取名，所以先在临时目录
+          # 摆好这一层再压。
+          STAGE="$(mktemp -d)"
+          mkdir -p "$STAGE/JabGrab"
+          cp -R dist/JabGrab.app dist/tools "$STAGE/JabGrab/"
+          # 拷完复验签名：cp 若漏了 bundle 里的符号链接，这里就会红 —— 而不是等用户
+          # 解压后发现应用打不开。
+          codesign --verify --verbose=1 "$STAGE/JabGrab/JabGrab.app"
+          ( cd "$STAGE" && zip -qry "$PKG" JabGrab )
+          rm -rf "$STAGE"
+
+          NAMES="$(unzip -Z1 "$PKG")"
+          for need in JabGrab/JabGrab.app/Contents/MacOS/jabgrab \
+                      JabGrab/tools/scraper/jab-scrape \
+                      JabGrab/tools/dlre/N_m3u8DL-RE; do
+            grep -qx "$need" <<<"$NAMES" || { echo "整包 zip 缺少 $need" >&2; exit 1; }
+          done
+          # 顶层多一项少一项，用户解压出来的位置就和文档对不上，所以逐条核。
+          if grep -qvE '^JabGrab(/|$)' <<<"$NAMES"; then
+            echo "整包 zip 顶层不是单一的 JabGrab/：" >&2
+            grep -vE '^JabGrab(/|$)' <<<"$NAMES" >&2
+            exit 1
+          fi
           du -h "$PKG"
 
       - uses: actions/upload-artifact@v7
@@ -311,7 +346,16 @@ jobs:
 
           bash scripts/build.sh --no-py --no-go
           if ($LASTEXITCODE -ne 0) { throw "组装失败（exit $LASTEXITCODE）" }
-          if (Test-Path ('dist' + [IO.Path]::DirectorySeparatorChar + 'tools')) { throw '轻量包里出现了 tools/' }
+
+          # 轻量包里不许有 tools/：默认值被人改回整包时会悄悄多 26MB。
+          # 空的 tools/ 是组装残留，zip 会把它也收进去、用户解压后看到一个空文件夹，
+          # 只能删掉；非空才说明整包内容漏进了轻量包，必须报错。
+          $toolsDir = Join-Path $PWD 'dist\tools'
+          if (Test-Path $toolsDir) {
+            if (Get-ChildItem $toolsDir -Force | Select-Object -First 1) { throw '轻量包里出现了非空 tools/' }
+            Remove-Item $toolsDir -Force
+            Write-Host '    删除残留的空 tools/ 目录'
+          }
 
           $PKG = Join-Path $PWD "jabgrab_${VERSION}_windows_amd64.zip"
           Push-Location dist
@@ -357,16 +401,24 @@ jobs:
           Remove-Item $selftest -Force
 
           $PKG = Join-Path $PWD "jabgrab_${VERSION}_full_windows_amd64.zip"
-          Push-Location dist
-          try { Compress-Archive -Path * -DestinationPath $PKG -Force } finally { Pop-Location }
+          # 解压后必须只有一个顶层目录 JabGrab/，而不是 jabgrab.exe 与 tools/ 散在
+          # 解压目录里（理由同 macOS 那步）。Compress-Archive 的 -Path 传目录时会把
+          # 目录名本身作为 zip 顶层条目，所以在临时目录里造出这层再压。
+          $stage = Join-Path ([IO.Path]::GetTempPath()) ('jabgrab-pkg-' + [Guid]::NewGuid().ToString('N'))
+          $outer = Join-Path $stage 'JabGrab'
+          New-Item -ItemType Directory -Path $outer -Force | Out-Null
+          Copy-Item -Path (Join-Path $PWD 'dist\*') -Destination $outer -Recurse -Force
+          try { Compress-Archive -Path $outer -DestinationPath $PKG -Force } finally { Remove-Item $stage -Recurse -Force }
 
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           $zip = [System.IO.Compression.ZipFile]::OpenRead($PKG)
           try {
             $names = @($zip.Entries | ForEach-Object { $_.FullName -replace '\\','/' })
-            foreach ($need in @('jabgrab.exe', 'tools/scraper/jab-scrape.exe', 'tools/dlre/N_m3u8DL-RE.exe')) {
+            foreach ($need in @('JabGrab/jabgrab.exe', 'JabGrab/tools/scraper/jab-scrape.exe', 'JabGrab/tools/dlre/N_m3u8DL-RE.exe')) {
               if ($names -notcontains $need) { throw "整包 zip 缺少 $need；前几条：$($names[0..4] -join ', ')" }
             }
+            $stray = @($names | Where-Object { $_ -ne 'JabGrab' -and -not $_.StartsWith('JabGrab/') })
+            if ($stray) { throw "整包 zip 顶层不是单一的 JabGrab/：$($stray -join ', ')" }
           } finally { $zip.Dispose() }
           '{0:N1} MB' -f ((Get-Item $PKG).Length / 1MB)
 
