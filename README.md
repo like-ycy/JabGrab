@@ -82,7 +82,7 @@ brew install ffmpeg
 | 依赖 | 谁来提供 | 缺失时的症状 |
 |---|---|---|
 | `jab-scrape` | 本项目用 PyInstaller 打包 | 提示「未找到爬取程序」 |
-| `N_m3u8DL-RE` | 上游 Release，版本由 `scripts/fetch-dlre.sh` 钉死 | 提示「未找到 N_m3u8DL-RE」 |
+| `N_m3u8DL-RE` | 上游 Release，版本由 `tools/fetch-dlre.sh` 钉死 | 提示「未找到 N_m3u8DL-RE」 |
 | `ffmpeg` | 用户自装 | `N_m3u8DL-RE` 启动即拒绝运行 |
 
 组件装在 `<配置目录>/components/`（见下节），与 App 本体分离：换爬取规则不必重发
@@ -138,26 +138,38 @@ cd go    && go run github.com/wailsapp/wails/v2/cmd/wails@v2.17.1 dev
 
 开发模式下 `internal/locate` 会向上找到含 `python/pyproject.toml` 的目录，直接用
 `uv run --project <python> jab-scrape`，不需要先打包侧车。下载器用
-`go/third_party/` 里随仓库内置的那一份。
+`third_party/dlre/<os>-<arch>/` 里随仓库内置的那一份。
 
 ### 打包发行目录
 
 ```bash
-scripts/build.sh                  # 轻量包：dist/ 只有 App
-scripts/build.sh --full           # 整包：额外带 tools/scraper/ 与 tools/dlre/
-scripts/build.sh --legacy-flat    # 旧扁平布局，仅用于验证老用户升级路径
-scripts/build.sh --no-py --no-go  # 复用已有产物，只重新组装目录
+tools/build.sh --full           # 整包：标准包 + 带 tools/ 的整包一次产出
+tools/build.sh                  # 只出标准包（首次使用时按需下载组件）
+tools/build.sh --no-python      # 复用已有 Python 产物，只重编 Go 外壳
+tools/build.sh --package-only   # 只组装与归档
+tools/build.sh -v 1.2.0         # 覆盖版本号（默认取 git tag）
 ```
 
-Windows 用 `pwsh -File scripts\build.ps1 [-Full] [-LegacyFlat] [-SkipPython] [-SkipGo]`。
+Windows 用 `pwsh -File tools\build.ps1 [-Full] [-NoPython] [-PackageOnly] [-Version X]`。
+
+产物：
+
+| 路径 | 内容 |
+|---|---|
+| `dist/JabGrab/` | 分发目录（运行时路径契约），整包时含 `tools/` |
+| `dist/release/jabgrab_<ver>_<os>_<arch>.zip` | 标准包，顶层唯一目录 `JabGrab/` |
+| `dist/release/jabgrab_<ver>_full_<os>_<arch>.zip` | 整包，同上 + `tools/{scraper,dlre}/` |
+| `dist/release/scraper_*` / `dlre_*` | 组件包与产物自述（按需下载的源） |
+
 相关脚本：
 
 | 脚本 | 作用 |
 |---|---|
-| `scripts/build.sh` / `build.ps1` | 组装发行目录（1/5～5/5 五步，含自检） |
-| `scripts/build-py.sh` | PyInstaller onedir 打包 `jab-scrape`，参数取自 `scripts/pyinstaller.args` |
-| `scripts/fetch-dlre.sh` | 拉取指定平台的 `N_m3u8DL-RE`（仓库内置 arm64 与 win-x64，Intel Mac 用它补 x64） |
-| `go run ./cmd/manifestgen` | 生成组件清单 `manifest.json` 与产物自述，复用 App 侧同一套 struct 校验 |
+| `tools/build.sh` / `build.ps1` | 唯一构建入口：Python 组件 → 组件包 → 预构建钩子 → wails build → 组装归档 |
+| `tools/package.sh` / `package.ps1` | 组装 `dist/JabGrab/` 并生成归档与 `SHA256SUMS.txt` |
+| `tools/component.sh` / `component.ps1` | 调 `cmd/manifestgen -pack` 产出组件包与自述 |
+| `tools/prebuild.sh` / `prebuild.ps1` | 发布构建时把本平台组件清单烘进 App（本地构建跳过） |
+| `tools/fetch-dlre.sh` | 拉取指定平台的 `N_m3u8DL-RE` 到 `third_party/dlre/<os>-<arch>/` |
 
 ### 测试与自检
 
@@ -168,17 +180,20 @@ cd python && uv run ruff check    # 静态检查
 node --test go/frontend/tests/pure.test.cjs   # 前端纯函数（要指到文件，Node 22 不接受目录）
 ```
 
-样式侧的额外自查：`scripts/sync-tokens.sh --check`，确认 `tokens.css` 没被手改。
+样式侧的额外自查：`tools/sync-tokens.sh --check`，确认 `tokens.css` 没被手改。
 
 产物级自检（验证「每个组件从哪来」，CI 与本地都跑）：
 
 ```bash
-./dist/JabGrab.app/Contents/MacOS/jabgrab --selftest   # macOS
-dist\jabgrab.exe --selftest                            # Windows
-jab-scrape --selftest                                  # 校验侧车里模块链是否齐全
+./dist/JabGrab/JabGrab.app/Contents/MacOS/jabgrab --selftest   # macOS
+dist\JabGrab\jabgrab.exe --selftest                            # Windows
+dist/JabGrab/tools/scraper/jab-scrape --selftest               # 侧车里模块链是否齐全
 ```
 
 ## 项目结构
+
+四个项目（media-dedupe / video_cut / video_library / grabber）共用同一套骨架：
+根目录只留组织性目录，语言各自一个子树。
 
 ```
 go/
@@ -197,13 +212,16 @@ go/
     component/       组件清单、下载、校验、安装、文件锁
     proc/            跨平台子进程（Windows 无黑窗 / UTF-8 输出）
   frontend/dist/     原生 JS 界面 + 由 xwang-ui 生成的 tokens.css，构建时 embed
-  third_party/       内置 N_m3u8DL-RE（macOS arm64 / Windows x64）
-  cmd/manifestgen/   清单生成工具
+  cmd/manifestgen/   清单与组件包生成工具
 python/
   src/jab_scrape/    CLI 入口、jable / missav 解析器、结果模型
+  packaging/         pyinstaller.spec + entry.py
   tests/             解析器单测
-scripts/             构建、打包、拉取上游二进制
-docs/                发布形态拆分的设计与实测记录
+third_party/
+  dlre/<os>-<arch>/  内置 N_m3u8DL-RE（darwin-arm64 / windows-amd64）
+tools/               构建、打包、拉取上游二进制
+docs/                发布形态拆分的设计与实测记录，以及打包契约
+dist/                组装目录与归档（不提交）
 .github/workflows/   Release 流水线
 ```
 
@@ -238,13 +256,13 @@ docs/                发布形态拆分的设计与实测记录
 
 ```bash
 # 1. 改脚本顶部的 TAG（在 xwang-ui 发布新版本之后）
-$EDITOR scripts/sync-tokens.sh          # XWANG_UI_TAG="v0.6.0"
+$EDITOR tools/sync-tokens.sh          # XWANG_UI_TAG="v0.6.0"
 # 2. 重新生成
-scripts/sync-tokens.sh
+tools/sync-tokens.sh
 # 3. 看 diff：取值变了就在本机起应用比一眼明暗两套
 git diff go/frontend/dist/tokens.css
 # 4. 平时自查有没有人误改生成物
-scripts/sync-tokens.sh --check          # 有漂移则非零退出
+tools/sync-tokens.sh --check          # 有漂移则非零退出
 ```
 
 脚本按 **tag** 从 xwang-ui 取源文件（不读它的工作区，避免拿到改到一半的版本），

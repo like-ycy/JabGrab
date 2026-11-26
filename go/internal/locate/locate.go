@@ -4,7 +4,7 @@
 //
 //  1. 配置里写死的路径（用户显式指定，错了就报错，不静默回退）
 //  2. 调用方注入的候选 —— 按需下载的组件（<config>/components/<name>-<ver>/）
-//  3. 随包 tools/<name>/（整包解压后的布局，见 scripts/build.sh）
+//  3. 随包 tools/<name>/（整包解压后的布局，见 tools/build.sh）
 //  4. 旧扁平布局：主程序同级目录、同级 bin/、同级 python/（已发布的 zip 就这样）
 //  5. 开发布局：third_party/、工作目录及其上级（go run / 本地构建）
 //  6. 系统 PATH
@@ -73,7 +73,7 @@ const (
 	SourcePath      = "系统 PATH"
 )
 
-// 随包布局的目录名。与 scripts/build.sh、scripts/build.ps1、CI 的打包步骤共同
+// 随包布局的目录名。与 tools/package.sh、tools/package.ps1、CI 的断言共同
 // 构成契约，改一处就要改三处。
 const (
 	bundledDirScraper = "tools/scraper"
@@ -175,9 +175,13 @@ func Dlr(cfg config.Config, extra ...Candidate) (string, string, error) {
 	if p, ok := findExecutable(name); ok {
 		return p, SourceSibling, nil
 	}
-	// 开发布局：仓库内 go/third_party/（从 go/ 目录运行 go run 时命中）
-	if p, ok := findExecutable(filepath.Join("third_party", name)); ok {
-		return p, SourceDev, nil
+	// 开发布局：仓库内 third_party/dlre/<os>-<arch>/。
+	// go run 的工作目录是 go/，所以要退一级才到仓库根；从仓库根跑命令时直接命中。
+	devRel := filepath.Join("third_party", "dlre", runtime.GOOS+"-"+runtime.GOARCH, name)
+	for _, candidate := range []string{devRel, filepath.Join("..", devRel)} {
+		if p, ok := findExecutable(candidate); ok {
+			return p, SourceDev, nil
+		}
 	}
 	if p, err := exec.LookPath(name); err == nil {
 		return p, SourcePath, nil

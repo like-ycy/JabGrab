@@ -7,8 +7,8 @@
 # go/frontend/dist/tokens.css，供 index.html 在 style.css 之前直接 <link>。
 #
 # 用法：
-#   scripts/sync-tokens.sh          重新生成 dist/tokens.css
-#   scripts/sync-tokens.sh --check  只比对不写；有漂移则非零退出（可用于本地自查）
+#   tools/sync-tokens.sh          重新生成 dist/tokens.css
+#   tools/sync-tokens.sh --check  只比对不写；有漂移则非零退出（可用于本地自查）
 #
 # 升级 xwang-ui：只改下面这一行 TAG，然后重新跑一次本脚本。
 
@@ -48,8 +48,8 @@ header="/* xwang-ui design tokens —— 生成物，请勿手改。
  *
  * 来源：xwang-ui@$XWANG_UI_TAG ($commit) $SOURCE_PATH
  * 生成：$(date '+%Y-%m-%d %H:%M:%S %z')
- * 重新生成：scripts/sync-tokens.sh
- * 校验漂移：scripts/sync-tokens.sh --check
+ * 重新生成：tools/sync-tokens.sh
+ * 校验漂移：tools/sync-tokens.sh --check
  *
  * 下面是源文件原文，一个字符都不要动；要改取值请去 xwang-ui。
  */"
@@ -64,7 +64,7 @@ strip_header() {
 }
 
 if [ "${1:-}" = "--check" ]; then
-    [ -f "$TARGET" ] || die "$TARGET 不存在，先跑一次不带参数的 scripts/sync-tokens.sh"
+    [ -f "$TARGET" ] || die "$TARGET 不存在，先跑一次不带参数的 tools/sync-tokens.sh"
     if diff -u <(strip_header <"$TARGET") <(printf '%s\n' "$body"); then
         echo "sync-tokens: 无漂移（$XWANG_UI_TAG / ${commit}）"
         exit 0

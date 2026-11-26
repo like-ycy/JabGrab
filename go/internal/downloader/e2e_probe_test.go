@@ -3,6 +3,7 @@ package downloader
 import (
 	"context"
 	"os"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -16,7 +17,7 @@ func TestE2EProbe(t *testing.T) {
 	}
 
 	opts := Options{
-		Bin:        "../../third_party/N_m3u8DL-RE",
+		Bin:        "../../third_party/dlre/" + runtime.GOOS + "-" + runtime.GOARCH + "/N_m3u8DL-RE",
 		SaveDir:    t.TempDir(),
 		SaveName:   "probe",
 		Threads:    8,

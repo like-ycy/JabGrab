@@ -1,41 +1,63 @@
-# ---------- 系统 ----------
-.DS_Store
+# 仓库结构与打包契约见 docs/packaging-contract.md
+#
+# 原则：只提交「源码 + 配置 + 锁文件 + Wails 脚手架」。
+# 带前导 / 的规则都是仓库根锚定的，这是刻意的：裸写 build/ 会连 go/build/ 一起忽略，
+# 而 go/build/appicon.png 是 macOS icns 与 Windows ico 的来源，不入库会让 CI 全新
+# clone 打出来的包退回 Wails 默认图标。
+#
+# 注意：third_party/dlre 下的二进制是**入库**的（两个平台各一份），
+# 只有 macOS Intel 需要 tools/fetch-dlre.sh 现拉 osx-x64。
 
-# ---------- 发行产物 ----------
-# scripts/build.sh 的输出（约 109M），只忽略根目录的 dist
-/dist/
-
-# 原始下载的 N_m3u8DL-RE 副本；构建实际使用 go/third_party/ 下的那一份
-/N_m3u8DL-RE
-
-# ---------- Python ----------
-python/.venv/
-python/build/
-python/.ruff_cache/
-__pycache__/
-*.py[cod]
-
-# ---------- Go / Wails ----------
-# Wails 构建目录整体忽略（bin/ 产物、自动生成的平台资源），
-# 但 appicon.png 是图标源文件：mac 的 icns 与 win 的 ico 都由它生成，
-# 不入库的话 CI 全新 clone 构建出来的包会退回 Wails 默认图标。
+# ── Go / Wails ──
 go/build/*
 !go/build/appicon.png
-# Wails 生成的 JS 绑定，前端直接用 window.go 调用，无需纳入版本管理
-go/frontend/wailsjs/
+/go/frontend/wailsjs/
+/go/.gocache-test/
+vendor/
 
-# ---------- 运行时残留 ----------
-# seleniumbase 启动时自动生成
+# ── Python（模板 B）──
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.venv/
+python/.venv/
+python/build/
+
+# ── 测试与工具缓存 ──
+.pytest_cache/
+.ruff_cache/
+
+# ── 组件与分发产物（tools/*.sh 的输出）──
+/dist/
+
+# ── 运行时数据 ──
+*.log
+Logs/
 latest_logs/
 downloaded_files/
 archived_files/
 archived_logs/
-# N_m3u8DL-RE 的运行日志
-Logs/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
 # 真实下载测试产生的分片
 go/internal/downloader/probe/
-*.log
 
-# ---------- 本地工具数据 ----------
-.workbuddy/
+# ── OS / 编辑器 / 本地工具 ──
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
 .serena/
+.workbuddy/
+
+# ── 项目特有 ──
+# 旧布局残留：仓库根直接落地的下载器副本与归档（新产物一律进 dist/）
+/N_m3u8DL-RE
+/*.zip

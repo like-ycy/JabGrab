@@ -55,7 +55,7 @@ Windows：`jabgrab.exe` + `N_m3u8DL-RE.exe` + `jab-scrape.exe` + `_internal/`（
 | 依赖 | 来源 | 缺失时的用户可见症状 |
 |---|---|---|
 | `jab-scrape` | 我们用 PyInstaller 构建 | 点开始即报「未找到爬取程序」 |
-| `N_m3u8DL-RE` | 上游 GitHub Release，版本由 `scripts/fetch-dlre.sh` 钉死 | 「未找到 N_m3u8DL-RE」 |
+| `N_m3u8DL-RE` | 上游 GitHub Release，版本由 `tools/fetch-dlre.sh` 钉死 | 「未找到 N_m3u8DL-RE」 |
 | `ffmpeg` | 用户自装（brew / PATH / 放下载器同目录） | `N_m3u8DL-RE` **启动即校验**，直接拒绝运行 |
 
 ## 2. 产物形态
@@ -119,7 +119,7 @@ macOS:   JabGrab.app/   tools/scraper/{jab-scrape,_internal/}   tools/dlre/N_m3u
 Windows: jabgrab.exe    tools/scraper/{jab-scrape.exe,_internal/}   tools/dlre/N_m3u8DL-RE.exe
 ```
 
-`tools/<name>/` 由 `scripts/build.sh`、`scripts/build.ps1` 定义，App 侧
+`tools/<name>/` 由 `tools/build.sh`、`tools/build.ps1` 定义，App 侧
 `go/internal/locate` 按同一路径探测。**不带版本号**：随包的东西天然只有一个版本。
 
 轻量包只有 `JabGrab.app` / `jabgrab.exe`，没有 `tools/`（CI 有反向断言）。
@@ -153,7 +153,7 @@ jabgrab_<ver>_full_<os>_<arch>.zip
 ### 4.3 旧扁平布局继续可用
 
 `locate` 的搜索链里保留「exe 同级 / 同级 bin/ / 同级 python/」三档，所以 v0.3.0
-的 zip 解压后照样能用。`scripts/build.sh --legacy-flat` 可以造一份出来验证。
+的 zip 解压后照样能用。`tools/build.sh --legacy-flat` 可以造一份出来验证。
 
 ## 5. manifest schema
 
@@ -270,11 +270,11 @@ CI 的 shell 里再拼一次。
 
 | 文件 | 内容 |
 |---|---|
-| `scripts/pyinstaller.args` | `--optimize 2`；`--hidden-import jab_scrape.jable` / `.missav`（惰性导入后 PyInstaller 看不到它们） |
-| `scripts/build-py.sh` | 打包后剔除 selenium-manager 与运行时驱动并断言、打印前后体积 |
-| `scripts/build.sh` | 三种形态（默认轻量 / `--full` / `--legacy-flat`）+ `--no-py`/`--no-go`（CI 只重新组装） |
-| `scripts/build.ps1` | 同上（PowerShell 等价实现，含 `-Full` / `-LegacyFlat` / `-SkipPython` / `-SkipGo`） |
-| `scripts/fetch-dlre.sh` | 角色扩成「三平台通用取件」，CI 用它拉上游二进制并校验 sha256 |
+| `python/packaging/pyinstaller.spec` | `--optimize 2` 等价物；`--hidden-import jab_scrape.jable` / `.missav`（惰性导入后 PyInstaller 看不到它们） |
+| `python/packaging/pyinstaller.spec` | 在 Analysis 阶段剔除 selenium-manager 与运行时驱动（不再打包后删文件） |
+| `tools/build.sh` | 三种形态（默认轻量 / `--full` / `--legacy-flat`）+ `--no-py`/`--no-go`（CI 只重新组装） |
+| `tools/build.ps1` | 同上（PowerShell 等价实现，含 `-Full` / `-LegacyFlat` / `-SkipPython` / `-SkipGo`） |
+| `tools/fetch-dlre.sh` | 角色扩成「三平台通用取件」，CI 用它拉上游二进制并校验 sha256 |
 
 ## 9. CI（`.github/workflows/release.yml`）
 
@@ -334,7 +334,7 @@ _internal/selenium/webdriver/common/selenium-manager-THIRD-PARTY-NOTICES.txt  28
 `scraper.py` 只写了 `SB(uc=True, test=True, ...)`，看起来「没配驱动」，但驱动解析
 由 SeleniumBase 接管，结论相同。
 
-实现：`scripts/build-py.sh` 打包完 `find -name 'selenium-manager*' -delete` + 断言。
+实现：`python/packaging/pyinstaller.spec` 在 Analysis 阶段过滤 `a.binaries` 与 `a.datas`，产物落盘前就不含这些文件。
 一个 pattern 覆盖全部六个文件。不改 PyInstaller 参数是因为 CLI 没有「排除某些
 data 文件」的选项，换 `.spec` 会引入平台分支，而 args 的「一份参数三平台共用」
 是刻意设计。

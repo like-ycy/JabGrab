@@ -1,5 +1,14 @@
 name: Release
 
+# 构建与打包全部收在 tools/build.sh（macOS）与 tools\build.ps1（Windows）里：
+# 本地一条命令能复现的东西，才有资格只在 CI 里跑一次。这里只负责
+# 「换平台 → 取下载器 → 调脚本 → 断言产物 → 传 artifact」。
+#
+# 产物命名（与 go/internal/locate、cmd/manifestgen 的约定一致）：
+#   jabgrab_<ver>[_full]_<goos>_<goarch>.zip
+#   scraper_<ver>_<goos>_<goarch>.zip / dlre_<ver>_<goos>_<goarch>.zip
+# 平台段取 GOOS（darwin/windows），不要写成 macos。
+
 on:
   push:
     tags:
@@ -10,31 +19,41 @@ on:
 permissions:
   contents: write
 
-# 资产一共 14 个：3 轻量包 + 3 整包 + 3 组件包(scraper) + 3 组件包(dlre)
+# 资产一共 14 个：3 标准包 + 3 整包 + 3 组件包(scraper) + 3 组件包(dlre)
 # + manifest.json + SHA256SUMS.txt。见 docs/release-split-plan.md §2。
 env:
-  # 组件包必须齐全的平台，与 -require 传给 manifestgen 的值保持一致。
   ALL_PLATFORMS: 'windows/amd64,darwin/arm64,darwin/amd64'
 
 jobs:
-  macos:
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
           # arm64 与 x64 各用一台原生 runner：Python 侧车（jab-scrape）由 PyInstaller
           # 打包，只能出本机架构；N_m3u8DL-RE 也要对应架构的那一份。
-          - goarch: arm64
+          - goos: darwin
+            goarch: arm64
             runner: macos-15
             dlre: osx-arm64
-          - goarch: amd64
+          - goos: darwin
+            goarch: amd64
             runner: macos-15-intel
             dlre: osx-x64
-    runs-on: ${{ matrix.runner }}
+          - goos: windows
+            goarch: amd64
+            runner: windows-2022
+            dlre: win-x64
+
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: 校验发布标签
+        shell: bash
         run: |
           if [ "$GITHUB_REF_TYPE" != "tag" ]; then
             echo "手动触发：跳过标签校验，产物仅作为 artifact 保留"
@@ -58,383 +77,89 @@ jobs:
 
       # 不用仓库里内置的那份：CI 现拉能保证与本文件钉住的 sha256 一致，也就保证
       # 三个平台拿到的是同一个上游构建。仓库里那份只是本地开发时的便利副本。
-      - name: 取 N_m3u8DL-RE
-        run: bash scripts/fetch-dlre.sh ${{ matrix.dlre }} --dest go/third_party
-
-      - name: 写入版本号
-        working-directory: go
-        run: |
-          # 只写 App 版本。爬取程序与下载器的版本来自各自产物的自述：前者是
-          # python/src/jab_scrape/_version.py，后者是 `N_m3u8DL-RE --version`。
-          # 把 tag 硬塞给它们，等于放弃了「组件独立发版」这件事本身。
-          node -e 'const fs=require("fs");const v=process.env.GITHUB_REF_TYPE==="tag"?process.env.GITHUB_REF_NAME.replace(/^v/,""):"0.0.0-dev";const p=JSON.parse(fs.readFileSync("wails.json","utf8"));p.info={...(p.info||{}),productVersion:v};fs.writeFileSync("wails.json",JSON.stringify(p,null,2)+"\n");'
-
-      - name: 打包 Python 爬取程序
-        run: bash scripts/build-py.sh
-
-      # --selftest 会逐个 import 站点解析器与 seleniumbase：--help 只走 argparse、
-      # --version 连 seleniumbase 都不碰，两者都抓不到「产物里少了某个模块」。
-      - name: 侧车自检
-        run: ./python/build/pyi/dist/jab-scrape/jab-scrape --selftest
-
-      - name: 组装组件包
-        run: |
-          set -euo pipefail
-          rm -rf out && mkdir -p out/scraper out/dlre
-          cp -R python/build/pyi/dist/jab-scrape/. out/scraper/
-          cp go/third_party/N_m3u8DL-RE out/dlre/
-          # 缩略列出链接：PyInstaller 在 macOS 上会产出 _internal/Python 之类的链接，
-          # 组件包里它们按链接保存。真出问题时，这一行是唯一能直接看到目标的地方。
-          find out -type l -exec ls -l {} \; || true
-          cd go
-          # -pack 一个命令完成三件事：跑产物取版本 → 生成自述 → 按自述版本命名打包。
-          # 包名与自述版本由同一份代码保证一致；用 shell 拼的话，两者分叉的表现是
-          # 「构建全绿、用户装完报缺少可执行文件」。
-          go run ./cmd/manifestgen -pack -src ../out/scraper -name scraper -binary jab-scrape \
-            -protocol 1 -slug darwin -arch ${{ matrix.goarch }} -out-dir ../out
-          go run ./cmd/manifestgen -pack -src ../out/dlre -name dlre -binary N_m3u8DL-RE \
-            -protocol 1 -slug darwin -arch ${{ matrix.goarch }} -out-dir ../out
-
-      - name: 自校验组件清单（本平台两份）
-        working-directory: go
-        run: |
-          go run ./cmd/manifestgen -dir ../out \
-            -base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/selftest" \
-            -name scraper -binary jab-scrape -merge -only darwin/${{ matrix.goarch }} \
-            -out ../out/manifest-selftest.json
-          go run ./cmd/manifestgen -dir ../out \
-            -base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/selftest" \
-            -name dlre -binary N_m3u8DL-RE -merge -only darwin/${{ matrix.goarch }} \
-            -out ../out/manifest-selftest.json
-          rm ../out/manifest-selftest.json
-
-      # 兜底清单只在 tag 构建里生成：清单里的地址形如 releases/download/<ref>，
-      # 而 Release 只对 tag 存在。分支构建写进去就是一批必然 404 的死链接。
-      - name: 生成内置兜底清单
-        working-directory: go
-        run: |
-          set -euo pipefail
-          if [ "$GITHUB_REF_TYPE" != "tag" ]; then
-            git checkout -- internal/component/manifest_builtin.json
-            echo "分支构建：保持空清单，组件安装走在线清单"
-            exit 0
-          fi
-          BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
-          go run ./cmd/manifestgen -dir ../out -base-url "$BASE" -name scraper -binary jab-scrape \
-            -merge -only darwin/${{ matrix.goarch }} -out internal/component/manifest_builtin.json
-          go run ./cmd/manifestgen -dir ../out -base-url "$BASE" -name dlre -binary N_m3u8DL-RE \
-            -merge -only darwin/${{ matrix.goarch }} -out internal/component/manifest_builtin.json
-
-      - name: 构建 macOS 应用
-        working-directory: go
-        run: |
-          WAILS_VER="$(grep -oE 'wailsapp/wails/v2 v[0-9]+\.[0-9]+\.[0-9]+' go.mod | head -1 | awk '{print $2}')"
-          go run "github.com/wailsapp/wails/v2/cmd/wails@${WAILS_VER}" build \
-            -clean \
-            -platform "darwin/${{ matrix.goarch }}"
-
-      - name: 组装并打包轻量包
-        run: |
-          set -euo pipefail
-          if [ "$GITHUB_REF_TYPE" = "tag" ]; then VERSION="${GITHUB_REF_NAME#v}"; else VERSION="0.0.0-dev"; fi
-
-          # --no-py --no-go：前面几步已经打过包、构建过应用，这里只重新组装目录，
-          # 让 CI 与本机 tools/build.sh 走同一段组装逻辑。
-          bash scripts/build.sh --no-py --no-go
-
-          # 反向断言：轻量包里不许有 tools/。默认值被人改回整包时，体积会悄悄
-          # 回涨 26MB，而界面上看不出任何差别。
-          #
-          # 空的 tools/ 单独处理：zip 会把它当条目收进包里，用户解压后看见一个空文件夹，
-          # 只会以为「组件没下全」。它是重组装的残留，删掉即可；非空才是整包内容漏进来。
-          if [ -d dist/tools ]; then
-            if [ -n "$(find dist/tools -mindepth 1 -print -quit)" ]; then
-              echo "轻量包里出现了非空 tools/：" >&2; find dist/tools >&2; exit 1
-            fi
-            echo "    删除残留的空 tools/ 目录"
-            rmdir dist/tools
-          fi
-
-          PKG="$PWD/jabgrab_${VERSION}_darwin_${{ matrix.goarch }}.zip"
-          ( cd dist && zip -qry "$PKG" JabGrab.app )
-          # 先落盘再 grep，避免 grep -q 提前退出把 unzip 顶成 SIGPIPE（pipefail 会因此判失败）
-          NAMES="$(unzip -Z1 "$PKG")"
-          grep -qx 'JabGrab.app/Contents/MacOS/jabgrab' <<<"$NAMES"
-          # 轻量包解压后只有一个 .app，不带任何 tools/ 条目。
-          if grep -q '^tools/' <<<"$NAMES"; then
-            echo "轻量包 zip 里出现了 tools/：" >&2; grep '^tools/' <<<"$NAMES" | head >&2; exit 1
-          fi
-          du -h "$PKG"
-
-      - name: 组装并打包整包
-        run: |
-          set -euo pipefail
-          if [ "$GITHUB_REF_TYPE" = "tag" ]; then VERSION="${GITHUB_REF_NAME#v}"; else VERSION="0.0.0-dev"; fi
-
-          bash scripts/build.sh --no-py --no-go --full
-
-          for p in dist/tools/scraper/jab-scrape dist/tools/dlre/N_m3u8DL-RE; do
-            [ -x "$p" ] || { echo "整包缺少 $p" >&2; exit 1; }
-          done
-
-          # 从最终位置真跑一次：结构对不对，只有三件套互相找得到彼此才算数。
-          #
-          # 不断言退出码：runner 上没有 ffmpeg，而 ffmpeg 是 dl-re 的启动期硬依赖，
-          # 自检会因此返回 1（本地装了 ffmpeg 才是 0）。要验的是「爬取程序与下载器
-          # 都在、且都来自随包」，所以断言输出内容，而不是退出码 —— 否则这条检查
-          # 测的是 runner 装没装 ffmpeg。
-          SELF="$(./dist/JabGrab.app/Contents/MacOS/jabgrab --selftest || true)"
-          echo "$SELF"
-          if [ "$(grep -c '来源: 随包' <<<"$SELF" || true)" -lt 2 ]; then
-            echo "自检没有报告两份随包来源（爬取程序与下载器应各一次）" >&2
-            exit 1
-          fi
-          if grep -qE "未找到爬取程序|未找到 N_m3u8DL-RE" <<<"$SELF"; then
-            echo "自检报告三件套缺失" >&2
-            exit 1
-          fi
-
-          PKG="$PWD/jabgrab_${VERSION}_full_darwin_${{ matrix.goarch }}.zip"
-          # 解压后必须只有一个顶层目录 JabGrab/，而不是把 .app 与 tools/ 散在解压目录里：
-          # 用户往往直接解压到「下载」或「桌面」，散开的两个大目录既容易和别的文件混在一起，
-          # 也没法整体挪走或删掉。zip 只能按「当前目录下的条目」取名，所以先在临时目录
-          # 摆好这一层再压。
-          STAGE="$(mktemp -d)"
-          mkdir -p "$STAGE/JabGrab"
-          cp -R dist/JabGrab.app dist/tools "$STAGE/JabGrab/"
-          # 拷完复验签名：cp 若漏了 bundle 里的符号链接，这里就会红 —— 而不是等用户
-          # 解压后发现应用打不开。
-          codesign --verify --verbose=1 "$STAGE/JabGrab/JabGrab.app"
-          ( cd "$STAGE" && zip -qry "$PKG" JabGrab )
-          rm -rf "$STAGE"
-
-          NAMES="$(unzip -Z1 "$PKG")"
-          for need in JabGrab/JabGrab.app/Contents/MacOS/jabgrab \
-                      JabGrab/tools/scraper/jab-scrape \
-                      JabGrab/tools/dlre/N_m3u8DL-RE; do
-            grep -qx "$need" <<<"$NAMES" || { echo "整包 zip 缺少 $need" >&2; exit 1; }
-          done
-          # 顶层多一项少一项，用户解压出来的位置就和文档对不上，所以逐条核。
-          if grep -qvE '^JabGrab(/|$)' <<<"$NAMES"; then
-            echo "整包 zip 顶层不是单一的 JabGrab/：" >&2
-            grep -vE '^JabGrab(/|$)' <<<"$NAMES" >&2
-            exit 1
-          fi
-          du -h "$PKG"
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: macos-${{ matrix.goarch }}
-          path: |
-            jabgrab_*.zip
-            out/scraper_*.zip
-            out/dlre_*.zip
-            out/scraper_meta_*.json
-            out/dlre_meta_*.json
-          if-no-files-found: error
-
-  windows:
-    runs-on: windows-2022
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: 校验发布标签
-        shell: bash
-        run: |
-          if [ "$GITHUB_REF_TYPE" != "tag" ]; then
-            echo "手动触发：跳过标签校验，产物仅作为 artifact 保留"
-            exit 0
-          fi
-          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-            echo "发布标签必须形如 vMAJOR.MINOR.PATCH"
-            exit 1
-          }
-
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go/go.mod
-          cache-dependency-path: go/go.sum
-
-      - uses: astral-sh/setup-uv@v10.3.3  # 该 action 不维护浮动主版本标签，只能写完整版本
-        with:
-          enable-cache: true
-          cache-dependency-glob: python/uv.lock
-
+      # 脚本的默认落点就是 third_party/dlre/<os>-<arch>/。
       - name: 取 N_m3u8DL-RE
         shell: bash
-        run: bash scripts/fetch-dlre.sh win-x64 --dest go/third_party
+        run: bash tools/fetch-dlre.sh ${{ matrix.dlre }}
 
-      - name: 写入版本号
-        working-directory: go
-        run: node -e 'const fs=require("fs");const v=process.env.GITHUB_REF_TYPE==="tag"?process.env.GITHUB_REF_NAME.replace(/^v/,""):"0.0.0-dev";const p=JSON.parse(fs.readFileSync("wails.json","utf8"));p.info={...(p.info||{}),productVersion:v};fs.writeFileSync("wails.json",JSON.stringify(p,null,2)+"\n");'
+      # 发布构建才生成内置兜底清单（清单里的地址是 releases/download/<tag>）；
+      # 本地构建不设 RELEASE_TAG，prebuild.sh 会保持仓库里的空清单。
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: tools/build.sh --full
 
-      - name: 打包 Python 爬取程序
-        shell: bash
-        run: bash scripts/build-py.sh
-
-      # 两个 PYTHON* 变量不是可有可无的：Windows 控制台默认 ANSI 代码页编不了
-      # 中文，--selftest 的中文输出会直接 UnicodeEncodeError —— 这正是运行时
-      # jab-scrape 输出中文 JSON 遇到的同一个坑（Go 侧在 internal/scraper 里已强制 UTF-8）。
-      - name: 侧车自检
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
-          PYTHONUTF8: "1"
-          PYTHONIOENCODING: utf-8
-        run: |
-          & 'python\build\pyi\dist\jab-scrape\jab-scrape.exe' --selftest
-          if ($LASTEXITCODE -ne 0) { throw "jab-scrape --selftest 退出码 $LASTEXITCODE" }
+          RELEASE_TAG: ${{ github.ref_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: .\tools\build.ps1 -Full
 
-      - name: 组装组件包
-        shell: bash
+      # 结构断言：目录名或组件位置对不上时，用户那边表现为「未找到组件」，
+      # 而构建日志一片绿。整包里还要真跑一次组件与会话自检。
+      - name: Assert layout (macOS)
+        if: runner.os == 'macOS'
         run: |
           set -euo pipefail
-          rm -rf out && mkdir -p out/scraper out/dlre
-          cp -R python/build/pyi/dist/jab-scrape/. out/scraper/
-          cp go/third_party/N_m3u8DL-RE.exe out/dlre/
-          find out -type l -exec ls -l {} \; || true
-          cd go
-          go run ./cmd/manifestgen -pack -src ../out/scraper -name scraper -binary jab-scrape \
-            -protocol 1 -slug windows -arch amd64 -out-dir ../out
-          go run ./cmd/manifestgen -pack -src ../out/dlre -name dlre -binary N_m3u8DL-RE \
-            -protocol 1 -slug windows -arch amd64 -out-dir ../out
+          version="$(git describe --tags --exact-match 2>/dev/null | sed 's/^v//' || echo 0.0.0-dev)"
+          lite="dist/release/jabgrab_${version}_darwin_${{ matrix.goarch }}.zip"
+          full="dist/release/jabgrab_${version}_full_darwin_${{ matrix.goarch }}.zip"
+          test -f "$lite" && test -f "$full" || { echo "缺少归档"; ls -R dist/release; exit 1; }
 
-      - name: 自校验组件清单（本平台两份）
-        shell: bash
-        working-directory: go
-        run: |
-          go run ./cmd/manifestgen -dir ../out \
-            -base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/selftest" \
-            -name scraper -binary jab-scrape -merge -only windows/amd64 \
-            -out ../out/manifest-selftest.json
-          go run ./cmd/manifestgen -dir ../out \
-            -base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/selftest" \
-            -name dlre -binary N_m3u8DL-RE -merge -only windows/amd64 \
-            -out ../out/manifest-selftest.json
-          rm ../out/manifest-selftest.json
+          names="$(unzip -Z1 "$full")"
+          for need in "JabGrab/JabGrab.app/Contents/MacOS/jabgrab" \
+                      "JabGrab/tools/scraper/jab-scrape" \
+                      "JabGrab/tools/dlre/N_m3u8DL-RE"; do
+            grep -qx "$need" <<<"$names" || { echo "整包缺少 $need"; exit 1; }
+          done
+          stray="$(grep -v '^JabGrab/' <<<"$names" || true)"
+          if [ -n "$stray" ]; then echo "整包顶层不是单一的 JabGrab/：$stray"; exit 1; fi
 
-      - name: 生成内置兜底清单
-        shell: bash
-        working-directory: go
-        run: |
-          set -euo pipefail
-          if [ "$GITHUB_REF_TYPE" != "tag" ]; then
-            git checkout -- internal/component/manifest_builtin.json
-            echo "分支构建：保持空清单，组件安装走在线清单"
-            exit 0
+          # 标准包必须不含 tools/：它是「拷组件之前的那棵树」。
+          if unzip -Z1 "$lite" | grep -q '^JabGrab/tools/'; then
+            echo "标准包里出现了 tools/"; exit 1
           fi
-          BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
-          go run ./cmd/manifestgen -dir ../out -base-url "$BASE" -name scraper -binary jab-scrape \
-            -merge -only windows/amd64 -out internal/component/manifest_builtin.json
-          go run ./cmd/manifestgen -dir ../out -base-url "$BASE" -name dlre -binary N_m3u8DL-RE \
-            -merge -only windows/amd64 -out internal/component/manifest_builtin.json
 
-      - name: 构建 Windows 应用
-        shell: bash
-        working-directory: go
-        run: |
-          WAILS_VER="$(grep -oE 'wailsapp/wails/v2 v[0-9]+\.[0-9]+\.[0-9]+' go.mod | head -1 | awk '{print $2}')"
-          go run "github.com/wailsapp/wails/v2/cmd/wails@${WAILS_VER}" build \
-            -clean \
-            -platform windows/amd64
+          ./dist/JabGrab/JabGrab.app/Contents/MacOS/jabgrab --selftest || true
+          ./dist/JabGrab/tools/scraper/jab-scrape --selftest
+          ./dist/JabGrab/tools/dlre/N_m3u8DL-RE --version | head -2
 
-      # Windows 上没有 zip（Git for Windows 不带），压缩走 Compress-Archive。
-      # 注意 -Path * 是在 dist 目录内展开，zip 根目录就是 jabgrab.exe，不会多一层。
-      - name: 组装并打包轻量包
+      - name: Assert layout (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          if ($env:GITHUB_REF_TYPE -eq 'tag') { $VERSION = $env:GITHUB_REF_NAME.Substring(1) } else { $VERSION = '0.0.0-dev' }
+          $version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME.Substring(1) } else { (git describe --tags --exact-match 2>$null) -replace '^v','' }
+          if (-not $version) { $version = '0.0.0-dev' }
+          $lite = "dist\release\jabgrab_${version}_windows_amd64.zip"
+          $full = "dist\release\jabgrab_${version}_full_windows_amd64.zip"
+          foreach ($p in @($lite, $full)) { if (-not (Test-Path $p)) { throw "缺少归档：$p" } }
 
-          bash scripts/build.sh --no-py --no-go
-          if ($LASTEXITCODE -ne 0) { throw "组装失败（exit $LASTEXITCODE）" }
-
-          # 轻量包里不许有 tools/：默认值被人改回整包时会悄悄多 26MB。
-          # 空的 tools/ 是组装残留，zip 会把它也收进去、用户解压后看到一个空文件夹，
-          # 只能删掉；非空才说明整包内容漏进了轻量包，必须报错。
-          $toolsDir = Join-Path $PWD 'dist\tools'
-          if (Test-Path $toolsDir) {
-            if (Get-ChildItem $toolsDir -Force | Select-Object -First 1) { throw '轻量包里出现了非空 tools/' }
-            Remove-Item $toolsDir -Force
-            Write-Host '    删除残留的空 tools/ 目录'
-          }
-
-          $PKG = Join-Path $PWD "jabgrab_${VERSION}_windows_amd64.zip"
-          Push-Location dist
-          try { Compress-Archive -Path * -DestinationPath $PKG -Force } finally { Pop-Location }
-          if (-not (Test-Path $PKG)) { throw "打包失败：$PKG" }
-
-          Add-Type -AssemblyName System.IO.Compression.FileSystem
-          $zip = [System.IO.Compression.ZipFile]::OpenRead($PKG)
-          try {
-            $names = @($zip.Entries | ForEach-Object { $_.FullName -replace '\\','/' })
-            if ($names -notcontains 'jabgrab.exe') { throw "zip 根目录缺少 jabgrab.exe；实际条目：$($names -join ', ')" }
-            if ($names -match '^tools/') { throw '轻量包里出现了 tools/' }
-          } finally { $zip.Dispose() }
-          '{0:N1} MB' -f ((Get-Item $PKG).Length / 1MB)
-
-      - name: 组装并打包整包
-        shell: pwsh
-        run: |
-          if ($env:GITHUB_REF_TYPE -eq 'tag') { $VERSION = $env:GITHUB_REF_NAME.Substring(1) } else { $VERSION = '0.0.0-dev' }
-
-          bash scripts/build.sh --no-py --no-go --full
-          if ($LASTEXITCODE -ne 0) { throw "组装失败（exit $LASTEXITCODE）" }
-          foreach ($p in @('dist\tools\scraper\jab-scrape.exe', 'dist\tools\dlre\N_m3u8DL-RE.exe')) {
-            if (-not (Test-Path $p)) { throw "整包缺少 $p" }
-          }
-
-          # 必须 Start-Process -Wait：wails 生产构建给 Windows 产物加了 -H windowsgui，
-          # 是 GUI 子系统程序，用 & 调用时 PowerShell 不会等待退出，$LASTEXITCODE
-          # 保持 $null，而 $null -ne 0 为真 —— 自检明明通过也会被误判成失败。
-          #
-          # 同样不拿退出码当判据：runner 上没有 ffmpeg，自检会因此返回 1。断言换成
-          # 「输出里两份随包来源都在、且没有报组件缺失」，这才是组装步骤该保证的事。
-          $selftest = Join-Path $PWD 'selftest.txt'
-          $proc = Start-Process -FilePath (Join-Path $PWD 'dist\jabgrab.exe') `
-            -ArgumentList '--selftest' -NoNewWindow -Wait -PassThru `
-            -RedirectStandardOutput $selftest
-          $text = Get-Content $selftest -Raw
-          Write-Host $text
-          if (-not $text) { throw "自检没有输出（exit $($proc.ExitCode)）" }
-          $bundled = ($text -split "`n" | Where-Object { $_ -match '来源: 随包' }).Count
-          if ($bundled -lt 2) { throw "自检只报告了 $bundled 份随包来源（应为 2）" }
-          if ($text -match '未找到爬取程序|未找到 N_m3u8DL-RE') { throw '自检报告三件套缺失' }
-          Remove-Item $selftest -Force
-
-          $PKG = Join-Path $PWD "jabgrab_${VERSION}_full_windows_amd64.zip"
-          # 解压后必须只有一个顶层目录 JabGrab/，而不是 jabgrab.exe 与 tools/ 散在
-          # 解压目录里（理由同 macOS 那步）。Compress-Archive 的 -Path 传目录时会把
-          # 目录名本身作为 zip 顶层条目，所以在临时目录里造出这层再压。
-          $stage = Join-Path ([IO.Path]::GetTempPath()) ('jabgrab-pkg-' + [Guid]::NewGuid().ToString('N'))
-          $outer = Join-Path $stage 'JabGrab'
-          New-Item -ItemType Directory -Path $outer -Force | Out-Null
-          Copy-Item -Path (Join-Path $PWD 'dist\*') -Destination $outer -Recurse -Force
-          try { Compress-Archive -Path $outer -DestinationPath $PKG -Force } finally { Remove-Item $stage -Recurse -Force }
-
-          Add-Type -AssemblyName System.IO.Compression.FileSystem
-          $zip = [System.IO.Compression.ZipFile]::OpenRead($PKG)
+          $zip = [System.IO.Compression.ZipFile]::OpenRead((Join-Path $PWD $full))
           try {
             $names = @($zip.Entries | ForEach-Object { $_.FullName -replace '\\','/' })
             foreach ($need in @('JabGrab/jabgrab.exe', 'JabGrab/tools/scraper/jab-scrape.exe', 'JabGrab/tools/dlre/N_m3u8DL-RE.exe')) {
-              if ($names -notcontains $need) { throw "整包 zip 缺少 $need；前几条：$($names[0..4] -join ', ')" }
+              if ($names -notcontains $need) { throw "整包缺少 $need" }
             }
-            $stray = @($names | Where-Object { $_ -ne 'JabGrab' -and -not $_.StartsWith('JabGrab/') })
-            if ($stray) { throw "整包 zip 顶层不是单一的 JabGrab/：$($stray -join ', ')" }
+            $stray = @($names | Where-Object { -not $_.StartsWith('JabGrab/') })
+            if ($stray.Count -gt 0) { throw "整包顶层不是单一的 JabGrab/" }
           } finally { $zip.Dispose() }
-          '{0:N1} MB' -f ((Get-Item $PKG).Length / 1MB)
+
+          & .\dist\JabGrab\tools\scraper\jab-scrape.exe --selftest
+          if ($LASTEXITCODE -ne 0) { throw 'scraper 自检失败' }
 
       - uses: actions/upload-artifact@v7
         with:
-          name: windows-amd64
-          path: |
-            jabgrab_*.zip
-            out/scraper_*.zip
-            out/dlre_*.zip
-            out/scraper_meta_*.json
-            out/dlre_meta_*.json
+          name: jabgrab-${{ matrix.goos }}-${{ matrix.goarch }}
+          # 组件自述（*_meta_*.json）也要传：release job 生成 manifest.json 时要用。
+          path: dist/release/*
           if-no-files-found: error
 
   release:
-    needs: [macos, windows]
+    needs: [build]
     # 只在推送 tag 时发布；手动触发即使 --ref 指向 tag 也只出 artifact
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
@@ -463,8 +188,8 @@ jobs:
             printf '%s\n' "${out[@]}"
           }
 
-          # 轻量与整包分开匹配：文件名只差一个 _full_，用同一个模式会把整包算进
-          # 轻量包 —— 数量对得上，而「默认下载项」可能是 57MB 的整包。
+          # 标准包与整包分开匹配：文件名只差一个 _full_，用同一个模式会把整包
+          # 算进标准包 —— 数量对得上，而「默认下载项」可能是 60MB 的整包。
           lite=()
           while IFS= read -r file; do lite+=("$file"); done < <(collect \
             \( -name 'jabgrab_*_darwin_arm64.zip' -o -name 'jabgrab_*_darwin_amd64.zip' \
@@ -487,7 +212,7 @@ jobs:
               failed=1
             fi
           }
-          check "轻量包" "${#lite[@]}" 3
+          check "标准包" "${#lite[@]}" 3
           check "整包" "${#full[@]}" 3
           check "scraper 组件包" "${#scrapers[@]}" 3
           check "dlre 组件包" "${#dlres[@]}" 3
@@ -540,6 +265,8 @@ jobs:
         run: |
           shopt -s nullglob
           assets=(release-pkg/*.zip release-pkg/manifest.json release-pkg/SHA256SUMS.txt)
+          # 数量写死是有意的：将来多一个组件包时这里会失败，逼着人回来确认
+          # 新资产确实该发，而不是无声地多发一个包。
           test "${#assets[@]}" -eq 14
           for asset in "${assets[@]}"; do
             basename "$asset"

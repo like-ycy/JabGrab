@@ -1,6 +1,6 @@
 {
   "$schema": "https://wails.io/schemas/config.v2.json",
-  "name": "jabgrab",
+  "name": "JabGrab",
   "outputfilename": "jabgrab",
   "frontend:install": "",
   "frontend:build": "",
@@ -11,6 +11,6 @@
   },
   "info": {
     "productName": "JabGrab",
-    "productVersion": "0.1.0"
+    "productVersion": "0.8.3"
   }
 }
