@@ -58,6 +58,8 @@ Thumbs.db
 .workbuddy/
 
 # ── 项目特有 ──
+# 手动调试用的输入清单（每行一个 URL），不入库
+download.txt
 # 旧布局残留：仓库根直接落地的下载器副本与归档（新产物一律进 dist/）
 /N_m3u8DL-RE
 /*.zip
