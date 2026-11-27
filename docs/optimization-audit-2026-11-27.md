@@ -26,7 +26,7 @@ P1 为成功判定、数据清理或进程无法收尾的问题；P2 为竞态�
 
 | 编号 | 状态 | 落地位置 | 覆盖用例 |
 | --- | --- | --- | --- |
-| GR-01 | 已修 | `downloadPhase`：`stampCandidates` → `producedVideo` → `incompleteDownload` → `writeDoneRecord`，最后才摘标记；`ClearDownloaded` 增加 `Path != ""` 复核 | `TestDownloadPhaseCommitsProducedFile`、`…RejectsEmptyOutput`、`…RejectsTruncatedOutput`、`TestProducedVideoOnlyAcceptsFreshWrites`、`TestIncompleteDownload` |
+| GR-01 | 已修 | `downloadPhase`：`stampCandidates` → `producedVideo` → `writeDoneRecord`，最后才摘标记；`ClearDownloaded` 增加 `Path != ""` 复核（原先的 `incompleteDownload` 体积兜底已于 v0.9.2 移除，见本节末） | `TestDownloadPhaseCommitsProducedFile`、`…RejectsEmptyOutput`、`…IgnoresReportedTotal`、`TestProducedVideoOnlyAcceptsFreshWrites` |
 | GR-02 | 已修 | `downloader.Run` 自建 `os.Pipe`，`Wait` 与读日志并行；**先等进程退出**，再对排空设 `drainGrace` 上限，超时关读端并杀进程组 | `TestRunDrainsWithinGraceWhenDescendantHoldsPipe`、`TestRunWaitsForLongProcessDespiteDrainGrace`、`TestRunNoTeardownWarnOnCleanExit` |
 | GR-03 | 已修 | `runToken` 代次贯穿 `patch`/`patchProgress`/`updateIndex`/`markRemaining`；预取 goroutine 用 `WaitGroup` + `waitTimeout` 收尾 | `TestStaleRunTokenIsIgnored` |
 | GR-04 | 已修 | `fileIndex` 改 `map[string][]string`，查找逐个实时校验、跳过残件继续找；与全遍历版 `findExisting` 的结果集合对照 | `TestIndexedLookupSkipsBrokenCandidate` |
@@ -60,6 +60,8 @@ GR-05 为什么只做一半：`BenchmarkStatePush` 实测单次「深拷贝全�
 **解决方案**：分开“查找既有可信成品”和“校验本次下载候选”两个入口。状态按 `downloading → validating → committed → done` 推进：找到本次实际输出、验证媒体可读性/时长/预期流，原子写完成记录，最后移除 part 标记并发布完成状态。无输出或验证失败保持 failed/待重试；标记和记录写失败不能悄悄退回旧版宽松判定。移除 TXT URL 应复核已提交的完成证据。
 
 **验收**：新文件正常完成、退出 0 无输出、退出 0 但输出截断、取消、磁盘满、完成记录写入失败；成功项都有非空路径和可读成品，失败项留在 TXT 中，重启后仍能准确区分残件。
+
+**后续变更（v0.9.2）**：`incompleteDownload` 已删除，`downloadPhase` 不再拿「下载器报告的总体积」比对成品体积。实测该数字在分片尚未探完时会持续递增（`jable.tv/videos/abf-403` 成品 1.94GB、报告值一路涨到 5.44GB），按 0.9 阈值卡会误判已经下完的片子。截断的判定改回「只认下载器退出码 + `producedVideo` 找到本次写出的成品」，对应用例改为 `TestDownloadPhaseIgnoresReportedTotal`。「退出 0 但无产物」仍判失败（`TestDownloadPhaseRejectsEmptyOutput`）。
 
 ## GR-02：避免在观测进程退出之前无界等待管道关闭
 

@@ -639,41 +639,6 @@ func tailOf(s string, n int) string {
 	return "..." + s[len(s)-n:]
 }
 
-func TestParseSize(t *testing.T) {
-	cases := []struct {
-		in   string
-		want int64
-		ok   bool
-	}{
-		{"959.17MB", 959*(1<<20) + 178*(1<<10), true}, // 近似，只校验量级
-		{"2.09GB", 2244120412, true},
-		{"12KB", 12 * (1 << 10), true},
-		{"2.09GiB", 2244120412, true}, // 与 GB 同口径
-		{"512B", 512, true},
-		{"", 0, false},
-		{"2.09", 0, false},
-		{"N/A", 0, false},
-		{"0MB", 0, false},
-	}
-	for _, c := range cases {
-		got, ok := ParseSize(c.in)
-		if ok != c.ok {
-			t.Fatalf("ParseSize(%q) ok=%v want=%v", c.in, ok, c.ok)
-		}
-		if !ok {
-			continue
-		}
-		// 允许 1% 误差，避免跟浮点换算较劲
-		diff := got - c.want
-		if diff < 0 {
-			diff = -diff
-		}
-		if diff*100 > c.want {
-			t.Fatalf("ParseSize(%q)=%d want≈%d", c.in, got, c.want)
-		}
-	}
-}
-
 // 下载器父进程退出、但后代进程还攥着 stdout 时，Run 必须在上限内返回，
 // 不能因为等不到 EOF 把整轮任务挂死（GR-02）。末尾日志仍要保留。
 func TestRunDrainsWithinGraceWhenDescendantHoldsPipe(t *testing.T) {

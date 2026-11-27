@@ -91,3 +91,26 @@ func TestDirRejectsBadInput(t *testing.T) {
 		t.Fatal("目录不存在应报错")
 	}
 }
+
+// 工具栏的「文件夹」按钮打开的是目录本身，不是「目录的上一层再选中它」。
+func TestOpenDirOpensTheDirItself(t *testing.T) {
+	record := fakeOpener(t)
+	dir := t.TempDir()
+
+	if err := OpenDir(dir); err != nil {
+		t.Fatalf("打开目录失败: %v", err)
+	}
+	args := waitArgs(t, record)
+	if len(args) != 1 || args[0] != dir {
+		t.Fatalf("应把目录本身交给文件管理器，实际参数 %q", args)
+	}
+}
+
+func TestOpenDirRejectsBadInput(t *testing.T) {
+	if err := OpenDir("  "); err == nil {
+		t.Fatal("空路径应报错")
+	}
+	if err := OpenDir(filepath.Join(t.TempDir(), "no-such-dir")); err == nil {
+		t.Fatal("目录不存在应报错")
+	}
+}

@@ -48,6 +48,10 @@ type Options struct {
 	MuxToMP4   bool
 	FFmpegPath string // 显式指定 ffmpeg，空则由 dl-re 自行查找
 	Headers    map[string]string
+	// OnStart 在子进程起来之后回调一次，参数是它的 pid（同时是进程组号）。
+	// 流水线据此把「当前在跑的下载器」记在案，停止时直接杀组，
+	// 不必等 ctx 取消传到 exec 的取消回调。
+	OnStart func(pid int)
 }
 
 // GUI 应用从 Finder 启动时 PATH 往往只有 /usr/bin:/bin，
@@ -281,6 +285,9 @@ func (o Options) Run(
 		errR.Close()
 		return fmt.Errorf("启动 N_m3u8DL-RE 失败: %w", err)
 	}
+	if o.OnStart != nil {
+		o.OnStart(cmd.Process.Pid)
+	}
 	// 写端已被子进程继承，父进程这份必须关掉，否则读端永远等不到 EOF。
 	outW.Close()
 	errW.Close()
@@ -441,40 +448,6 @@ func ParseProgress(line string) (Progress, bool) {
 func isProgressLine(line string) bool {
 	_, ok := ParseProgress(line)
 	return ok
-}
-
-// sizeUnitRe 匹配 "959.17MB" / "2.09GB" 这类体积串。
-var sizeUnitRe = regexp.MustCompile(`^([\d.]+)\s*([KMGTP]?i?B)$`)
-
-// ParseSize 把进度里的人类可读体积转成字节数。
-//
-// dl-re 按 1024 进制打印，这里也用 1024；调用方拿它做「成品是否明显偏小」的
-// 粗略校验，阈值留得比较宽，进制差几个百分点不影响结论。
-func ParseSize(s string) (int64, bool) {
-	m := sizeUnitRe.FindStringSubmatch(strings.TrimSpace(s))
-	if m == nil {
-		return 0, false
-	}
-	v, err := strconv.ParseFloat(m[1], 64)
-	if err != nil || v <= 0 {
-		return 0, false
-	}
-	// "GiB" 与 "GB" 都按 1024 进制算：这里只服务于粗判，进制差几个百分点不影响结论。
-	unit := strings.ReplaceAll(strings.ToUpper(m[2]), "I", "")
-	mult := float64(1)
-	switch unit {
-	case "KB":
-		mult = 1 << 10
-	case "MB":
-		mult = 1 << 20
-	case "GB":
-		mult = 1 << 30
-	case "TB":
-		mult = 1 << 40
-	case "PB":
-		mult = 1 << 50
-	}
-	return int64(v * mult), true
 }
 
 // flushBytes 是「没有分隔符时先吐出去」的字节阈值。

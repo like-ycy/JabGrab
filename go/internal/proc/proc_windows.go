@@ -3,6 +3,8 @@
 package proc
 
 import (
+	"errors"
+	"os"
 	"os/exec"
 	"strconv"
 	"syscall"
@@ -24,11 +26,28 @@ func Kill(cmd *exec.Cmd) error {
 	if cmd == nil || cmd.Process == nil {
 		return nil
 	}
-	pid := strconv.Itoa(cmd.Process.Pid)
-	kill := exec.Command("taskkill", "/T", "/F", "/PID", pid)
+	return KillPID(cmd.Process.Pid)
+}
+
+// KillPID 递归终止以 pid 为根的整棵进程树。
+//
+// 暴露成函数是为了让「停止」按钮能直接下手，不必等 exec 的取消回调被调度。
+func KillPID(pid int) error {
+	if pid <= 0 {
+		return nil
+	}
+	kill := exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(pid)) //nolint:gosec // pid 来自本进程启动的子进程
 	Prepare(kill)
 	if err := kill.Run(); err != nil {
-		return cmd.Process.Kill()
+		p, ferr := os.FindProcess(pid)
+		if ferr != nil {
+			// 进程已经不在了：与 unix 上的 ESRCH 同义，视为成功，
+			// 免得「自然退出」与「按了停止」撞在一起时报一个假失败。
+			return nil
+		}
+		if kerr := p.Kill(); kerr != nil && !errors.Is(kerr, os.ErrProcessDone) {
+			return kerr
+		}
 	}
 	return nil
 }

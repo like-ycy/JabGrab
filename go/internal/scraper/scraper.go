@@ -39,6 +39,10 @@ type Scraper struct {
 	Dir     string        // 工作目录
 	Timeout time.Duration // 单次爬取超时
 	Log     func(string)  // stderr 逐行回调，可为 nil
+	// OnStart 在子进程起来之后回调一次，参数是它的 pid（同时是进程组号）。
+	// 流水线据此把「当前在跑的爬取进程」记在案，停止时直接杀组，
+	// 不必等 ctx 取消传到 exec 的取消回调。
+	OnStart func(pid int)
 }
 
 // Scrape 抓取单个 URL。返回的 error 表示流程性故障（进程起不来/超时/无 JSON），
@@ -83,6 +87,9 @@ func (s Scraper) Scrape(ctx context.Context, url, source string) (Result, error)
 	}
 	if err := cmd.Start(); err != nil {
 		return Result{}, fmt.Errorf("启动爬取进程失败: %w", err)
+	}
+	if s.OnStart != nil {
+		s.OnStart(cmd.Process.Pid)
 	}
 
 	// stderr 可能很长（浏览器日志），实时转发给 UI，同时留最后几行做错误摘要。

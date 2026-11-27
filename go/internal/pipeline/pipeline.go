@@ -18,6 +18,7 @@ import (
 	"jabgrab/internal/config"
 	"jabgrab/internal/downloader"
 	"jabgrab/internal/locate"
+	"jabgrab/internal/proc"
 	"jabgrab/internal/scraper"
 )
 
@@ -97,6 +98,13 @@ type Runner struct {
 	// emitMu 只保护进度节流定时器，与 mu 分开：不能持状态锁等定时器。
 	emitMu      sync.Mutex
 	pendingEmit *time.Timer
+
+	// children 是当前在跑的受管子进程 pid（进程组号）。
+	//
+	// 爬取与下载可能同时各有一个（预取第 N+1 条时正在下第 N 条），所以是集合
+	// 而不是单个字段。「停止」直接照它杀组，不等 ctx 取消经 exec 回调绕一圈：
+	// 浏览器与被杀到一半的下载器多活一秒，就多写一秒盘、多留一秒孤儿进程。
+	children map[int]bool
 }
 
 // New 创建 Runner。
@@ -145,14 +153,53 @@ func (r *Runner) Reset() error {
 	return nil
 }
 
-// Stop 请求停止：取消 ctx 会杀掉当前爬取/下载进程组。
+// Stop 请求停止：取消 ctx，并立即杀掉正在跑的爬取 / 下载进程组。
+//
+// 两件事都要做。cancel 会经由 exec 的取消回调杀进程组，但那是异步的：回调
+// 要等调度，dl-re 还会先把管道里的缓冲吐完。用户在「停止」上按下之后紧跟着
+// 打开活动监视器，看到的就是「已经点了停止、N_m3u8DL-RE 还在下」。
+// 这里按记下的 pid 直接对进程组下手，杀完才算数；cancel 仍然要发，
+// 否则流水线不知道这一轮已经结束（各阶段的返回值得靠 ctx 才算得出「已取消」）。
 func (r *Runner) Stop() {
 	r.mu.Lock()
 	cancel := r.cancel
+	pids := make([]int, 0, len(r.children))
+	for pid := range r.children {
+		pids = append(pids, pid)
+	}
 	r.mu.Unlock()
+
 	if cancel != nil {
 		cancel()
 	}
+	// 顺序有意为之：先 cancel 断掉启动下一个子进程的可能，再逐个杀组。
+	// 杀组是幂等的（进程已退出时视为成功），与取消回调重复无害。
+	// 真杀不掉时留一行日志：那意味着用户按了停止、进程还在，事后要查得出来。
+	for _, pid := range pids {
+		if err := proc.KillPID(pid); err != nil {
+			r.logf("warn", fmt.Sprintf("停止时未能杀掉进程组 %d: %v", pid, err))
+		}
+	}
+}
+
+// beginChild 记下一个刚起来的受管子进程。
+func (r *Runner) beginChild(pid int) {
+	if pid <= 0 {
+		return
+	}
+	r.mu.Lock()
+	if r.children == nil {
+		r.children = make(map[int]bool, 2)
+	}
+	r.children[pid] = true
+	r.mu.Unlock()
+}
+
+// endChild 划掉一个已经收尾的受管子进程。
+func (r *Runner) endChild(pid int) {
+	r.mu.Lock()
+	delete(r.children, pid)
+	r.mu.Unlock()
 }
 
 // Run 执行一轮完整流程，阻塞直到结束或被取消。
@@ -370,9 +417,23 @@ func (r *Runner) scrapePhase(ctx context.Context, scr scraper.Scraper, idx int, 
 
 	r.patch(tok, idx, func(it *Item) {
 		it.Status = StatusScraping
-		it.Message = "爬取中"
+		// 说明文字留空：状态列已经有蓝色「爬取中」标签，再补一行灰色「爬取中」
+		// 只是把同一句话说两遍，看着像两个不同的状态。
+		it.Message = ""
 	})
 	r.logf("info", fmt.Sprintf("[%d/%d] 爬取 %s（%s）", idx+1, total, item.URL, item.Site))
+
+	// 记下爬取进程（含它拉起的浏览器）：按下「停止」时直接杀这个进程组。
+	var child int
+	scr.OnStart = func(pid int) {
+		child = pid
+		r.beginChild(pid)
+	}
+	defer func() {
+		if child > 0 {
+			r.endChild(child)
+		}
+	}()
 
 	res, err := scr.Scrape(ctx, item.URL, item.Site)
 	if err != nil {
@@ -398,7 +459,7 @@ func (r *Runner) scrapePhase(ctx context.Context, scr scraper.Scraper, idx int, 
 	if name == "" {
 		return res, errors.New("爬取结果没有视频名")
 	}
-	r.patch(tok, idx, func(it *Item) { it.Name = name; it.Message = "已拿到 m3u8" })
+	r.patch(tok, idx, func(it *Item) { it.Name = name })
 	return res, nil
 }
 
@@ -456,6 +517,8 @@ func (r *Runner) downloadPhase(
 	// 完的成品判成旧的（下文 producedVideo）。
 	before := stampCandidates(saveDir, name)
 
+	// 当前下载器进程的 pid，用来在收尾时从「停止」的射程里划掉。
+	var child int
 	opts := downloader.Options{
 		Bin:        t.dlrPath,
 		SaveDir:    saveDir,
@@ -467,16 +530,18 @@ func (r *Runner) downloadPhase(
 		MuxToMP4:   cfg.Download.MuxToMP4,
 		FFmpegPath: t.ffmpegPath,
 		Headers:    res.Headers,
+		// 记下下载器进程：按下「停止」时直接杀这个进程组（含它派生的 ffmpeg）。
+		OnStart: func(pid int) {
+			child = pid
+			r.beginChild(pid)
+		},
 	}
 
-	// reportedTotal 是下载器自己报告的总体积（多轨取最大的一轨）。
-	// 它只用来兜底「退出 0 但只写了一半」，不做精确比对。
-	var reportedTotal int64
+	// 下载器自己报告的总体积在「分片还没探完」时会一直往上跳，拿它比对成品体积
+	// 会把已经下完的片子判成残件（实测 1.94GB 的成品对上一路涨到 5.44GB 的报告值），
+	// 所以这里不做体积校验：下没下完只认下载器的退出码与本次实际产物。
 	err := opts.Run(ctx, res.M3U8URL,
 		func(p downloader.Progress) {
-			if n, ok := downloader.ParseSize(p.TotalSize); ok && n > reportedTotal {
-				reportedTotal = n
-			}
 			r.patchProgress(tok, idx, func(it *Item) {
 				it.Percent = p.Percent
 				it.Speed = p.Speed
@@ -487,6 +552,9 @@ func (r *Runner) downloadPhase(
 		},
 		func(line string) { r.logf("debug", line) },
 	)
+	if child > 0 {
+		r.endChild(child)
+	}
 	if err != nil {
 		// 失败时标记留着：同名文件下次仍按残件处理，不会被当成成品信任。
 		return err
@@ -498,9 +566,6 @@ func (r *Runner) downloadPhase(
 	outPath := producedVideo(saveDir, name, before)
 	if outPath == "" {
 		return errors.New("下载器已退出，但没有找到本次写出的成品文件；已保留下载标记，下次仍按残件重下")
-	}
-	if reason := incompleteDownload(outPath, reportedTotal); reason != "" {
-		return errors.New(reason)
 	}
 
 	// 先写完成记录、再摘标记：顺序反了就等于把这份文件降级成「既无记录也无标记
@@ -1121,27 +1186,6 @@ func producedVideo(dir, name string, before map[string]fileStamp) string {
 		return p
 	}
 	return ""
-}
-
-// incompleteDownload 兜底判断「退出 0 但只写了一半」，返回非空串即为不可信。
-//
-// 参照是下载器自己报告的总体积（多轨取最大的一轨）。阈值 0.9 留得宽：
-// TS→MP4 重封装会去掉约 2% 的容器开销，而真正的截断远低于这条线；
-// 多轨时成品是各轨之和，只会比单轨总量更大，所以不会误伤。
-// 拿不到报告体积（解析失败或没收到进度）时不做判断。
-func incompleteDownload(path string, reportedTotal int64) string {
-	if reportedTotal <= 0 {
-		return ""
-	}
-	st, err := os.Stat(path)
-	if err != nil {
-		return ""
-	}
-	if st.Size()*10 >= reportedTotal*9 {
-		return ""
-	}
-	return fmt.Sprintf("成品只有 %s，下载器报告的总体积是 %s，疑似未下完",
-		humanSize(st.Size()), humanSize(reportedTotal))
 }
 
 func (r *Runner) item(idx int) Item {

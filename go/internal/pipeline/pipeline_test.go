@@ -580,24 +580,6 @@ func TestProducedVideoOnlyAcceptsFreshWrites(t *testing.T) {
 	}
 }
 
-// 退出 0 但只写了一半时，要能被下载器自己报告的体积挡住。
-func TestIncompleteDownload(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "a.mp4")
-	if err := os.WriteFile(p, make([]byte, 800), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if reason := incompleteDownload(p, 0); reason != "" {
-		t.Fatalf("没有报告体积时不应判断 got=%q", reason)
-	}
-	if reason := incompleteDownload(p, 800); reason != "" {
-		t.Fatalf("体积一致时不应判为未下完 got=%q", reason)
-	}
-	if reason := incompleteDownload(p, 8000); reason == "" || !strings.Contains(reason, "疑似未下完") {
-		t.Fatalf("只写了 10%% 时应判为未下完 got=%q", reason)
-	}
-}
-
 // 假下载器：按 --save-name/--save-dir 落到文件，可选打一行进度。
 const fakeDlreScript = `#!/bin/sh
 name=""; dir=""
@@ -688,19 +670,26 @@ func TestDownloadPhaseRejectsEmptyOutput(t *testing.T) {
 	}
 }
 
-// 退出 0 但只写了很小一段：按下载器报告的总体积判为未下完。
-func TestDownloadPhaseRejectsTruncatedOutput(t *testing.T) {
+// 退出 0 但只写了很小一段：只认退出码与本次产物，不再拿下载器报告的总体积比对。
+// 那个数字在分片还没探完时会一路涨（实测 1.94GB 的成品对上一路涨到 5.44GB 的
+// 报告值），拿它卡体积只会把下完的片子判成残件。
+func TestDownloadPhaseIgnoresReportedTotal(t *testing.T) {
 	const name = "AUDIT-003"
 
 	r, save, err := runDownloadPhase(t, name, map[string]string{"FAKE_PROGRESS": "1"})
-	if err == nil || !strings.Contains(err.Error(), "疑似未下完") {
-		t.Fatalf("截断的产物应报错 got=%v", err)
+	if err != nil {
+		t.Fatalf("下载器没报错就不该判失败，got=%v", err)
 	}
-	if it := r.item(0); it.Status == StatusDone {
-		t.Fatalf("截断时不应标完成 got=%+v", it)
+	want := filepath.Join(save, name+".mp4")
+	it := r.item(0)
+	if it.Status != StatusDone || it.Path != want {
+		t.Fatalf("应按完成处理 got status=%s path=%q", it.Status, it.Path)
 	}
-	if _, statErr := os.Stat(partMarkerPath(save, name)); statErr != nil {
-		t.Fatalf("失败时应保留下载标记: %v", statErr)
+	if _, statErr := os.Stat(doneRecordPath(want)); statErr != nil {
+		t.Fatalf("应写完成记录: %v", statErr)
+	}
+	if _, statErr := os.Stat(partMarkerPath(save, name)); !os.IsNotExist(statErr) {
+		t.Fatal("完成之后标记应已摘掉")
 	}
 }
 

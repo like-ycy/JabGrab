@@ -268,6 +268,24 @@ func (a *App) RevealFile(path string) error {
 	return reveal.Dir(path)
 }
 
+// OpenSaveDir 在文件管理器里打开保存目录（工具栏的「文件夹」按钮）。
+//
+// 用当前配置而不是启动时那份：设置页改完保存目录立刻生效。目录还没建出来时
+// 顺手建一个 —— 用户点这个按钮就是想看下载落到哪儿，报「目录不存在」帮不上忙。
+func (a *App) OpenSaveDir() error {
+	a.mu.Lock()
+	dir := a.cfg.SaveDir
+	a.mu.Unlock()
+
+	if strings.TrimSpace(dir) == "" {
+		return errors.New("还没有设置视频保存目录")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("保存目录不存在且无法创建: %w", err)
+	}
+	return reveal.OpenDir(dir)
+}
+
 // Start 启动流水线，立即返回，进度通过事件推送。
 func (a *App) Start() error {
 	a.mu.Lock()

@@ -45,6 +45,29 @@ func Dir(file string) error {
 	return openDir(dir)
 }
 
+// OpenDir 直接在系统文件管理器里打开一个目录（工具栏的「文件夹」按钮）。
+//
+// 与 Dir 的区别：Dir 是「打开某个文件所在的目录并选中它」，这里是打开目录本身。
+// 还在下载时成品文件未必落地，用户想看的往往是「下到哪儿了」，所以不能拿
+// 成品路径去调 Dir —— 那条路只对已完成的行有意义。
+func OpenDir(dir string) error {
+	path := strings.TrimSpace(dir)
+	if path == "" {
+		return errors.New("还没有设置保存目录")
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("目录打不开: %w", err)
+	}
+	if !st.IsDir() {
+		return fmt.Errorf("%s 不是目录", path)
+	}
+	return openDir(path)
+}
+
 // start 启动命令但不等待它退出。
 //
 // 文件管理器是长驻进程，等下去会把界面线程拖住；但必须回收，否则 unix 上

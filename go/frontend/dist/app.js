@@ -332,6 +332,9 @@ function rowCells(it, i, running) {
 
     // 状态与进度合并成一列：下载中给进度条；失败永远显示原因（哪怕有过半截进度）；
     // 其余状态显示后端给的说明（已存在 / 取消原因等）。
+    // 说明文字与状态标签一字不差时不再画第二遍：状态列里一蓝一灰两行「爬取中」
+    // 看着像两个互相矛盾的状态（用户反馈的「爬取中会显示两个」）。
+    const tagText = STATUS_TEXT[st] || st;
     let extra = "";
     if (st === "downloading") {
         extra = `<div class="bar small"><i style="width:${pct.toFixed(1)}%"></i></div>
@@ -341,10 +344,8 @@ function rowCells(it, i, running) {
             </div>`;
     } else if (st === "failed") {
         extra = `<div class="state-msg err" title="${escapeHtml(msg)}">${escapeHtml(msg || "未知错误")}</div>`;
-    } else if (msg) {
+    } else if (msg && msg !== tagText) {
         extra = `<div class="state-msg" title="${escapeHtml(msg)}">${escapeHtml(msg)}</div>`;
-    } else if (st === "scraping") {
-        extra = '<div class="state-msg">解析页面中…</div>';
     }
 
     const speed = it.speed ? `${it.speed}${it.eta ? " · " + it.eta : ""}` : "";
@@ -384,7 +385,7 @@ function rowCells(it, i, running) {
         <td class="col-site"><span class="tag">${escapeHtml(it.site || "-")}</span></td>
         <td class="col-state">
             <div class="state-cell">
-                <span class="tag ${escapeHtml(st)}">${escapeHtml(STATUS_TEXT[st] || st)}</span>
+                <span class="tag ${escapeHtml(st)}">${escapeHtml(tagText)}</span>
                 ${extra}
             </div>
         </td>
@@ -1063,6 +1064,17 @@ function bindButtons() {
         } catch (err) {
             appendLog({ level: "error", text: "清除已下载 URL 失败: " + err });
             toast("清除已下载 URL 失败: " + err, "error");
+        }
+    });
+
+    // 打开保存目录：下载途中也能点，直接看文件落到了哪儿。
+    el("btnOpenDir").addEventListener("click", async () => {
+        if (!api()) return;
+        try {
+            await api().OpenSaveDir();
+        } catch (err) {
+            appendLog({ level: "error", text: "打开文件夹失败: " + err });
+            toast("打开文件夹失败: " + err, "error");
         }
     });
 
