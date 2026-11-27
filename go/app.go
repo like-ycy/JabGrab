@@ -334,7 +334,10 @@ func (a *App) ClearDownloaded() (pipeline.PruneResult, error) {
 
 	var done []string
 	for _, it := range runner.Snapshot().Items {
-		if pipeline.Downloaded(it.Status) {
+		// 除了状态，还要有成品的实际路径才算「已下好」：状态是流水线自己标的，
+		// 路径是它当时找到的文件。两者对不上时宁可把这行留在 txt 里，
+		// 也别把一个其实没落地的 URL 从清单上抹掉（清掉就再也想不起来要下它了）。
+		if pipeline.Downloaded(it.Status) && it.Path != "" {
 			done = append(done, it.URL)
 		}
 	}

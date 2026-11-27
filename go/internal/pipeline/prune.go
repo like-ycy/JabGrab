@@ -78,18 +78,21 @@ func PruneURLs(path string, urls []string) (PruneResult, error) {
 		return res, nil
 	}
 	if err := writeFileAtomic(path, []byte(strings.Join(kept, "\n")), mode); err != nil {
-		return res, err
+		return res, fmt.Errorf("写入 txt 失败: %w", err)
 	}
 	return res, nil
 }
 
 // writeFileAtomic 先写同目录临时文件再改名：中途失败（磁盘满、权限不足、
 // 被别的程序占用）时原文件还在，不会留下写了一半的清单。
+//
+// 错误只描述失败环节，不假定用途：同一份实现也被完成记录（.jabgrab-done）用，
+// 那边把错误包成「写完成记录失败」，这里包成「写入 txt 失败」。
 func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".jabgrab-prune-*")
+	tmp, err := os.CreateTemp(dir, ".jabgrab-tmp-*")
 	if err != nil {
-		return fmt.Errorf("写入 txt 失败: %w", err)
+		return fmt.Errorf("创建临时文件失败: %w", err)
 	}
 	name := tmp.Name()
 	discard := func() {
@@ -99,21 +102,21 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 
 	if _, err := tmp.Write(data); err != nil {
 		discard()
-		return fmt.Errorf("写入 txt 失败: %w", err)
+		return fmt.Errorf("写入失败: %w", err)
 	}
 	// 保留原文件的权限位：临时文件默认是 0600，直接改名会把用户改过的
 	// 0644/0664 悄悄变成只有自己可读。
 	if err := tmp.Chmod(mode); err != nil {
 		discard()
-		return fmt.Errorf("写入 txt 失败: %w", err)
+		return fmt.Errorf("设置权限失败: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(name)
-		return fmt.Errorf("写入 txt 失败: %w", err)
+		return fmt.Errorf("关闭临时文件失败: %w", err)
 	}
 	if err := os.Rename(name, path); err != nil {
 		os.Remove(name)
-		return fmt.Errorf("替换 txt 失败: %w", err)
+		return fmt.Errorf("替换失败: %w", err)
 	}
 	return nil
 }
