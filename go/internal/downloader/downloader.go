@@ -173,7 +173,7 @@ func (o Options) Args(m3u8 string) []string {
 	}
 
 	// 去掉 ANSI 控制符，否则捕获到的 stdout 充满转义序列，无法解析进度。
-	args = append(args, "--no-ansi-color", "--auto-select")
+	args = append(args, "--no-ansi-color", "--auto-select", "--disable-update-check")
 
 	// ffmpeg 是 dl-re 的启动期硬依赖（缺了直接抛异常退出），与是否混流无关，
 	// 所以只要拿到路径就显式传入，避免依赖子进程自己去 PATH 里找。

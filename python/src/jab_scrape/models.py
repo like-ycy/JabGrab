@@ -5,6 +5,17 @@ from typing import Any
 
 
 @dataclass
+class PageSnapshot:
+    """同一次页面采样的源码、来源信息和浏览器实际使用的媒体地址。"""
+
+    html: str
+    url: str
+    user_agent: str
+    player_url: str = ""
+    media_urls: list[str] = field(default_factory=list)
+
+
+@dataclass
 class ScrapeResult:
     """单次爬取结果，序列化后即 CLI 的 stdout 输出。"""
 

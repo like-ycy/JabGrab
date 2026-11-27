@@ -1,30 +1,76 @@
-"""MissAV 站点解析。"""
+"""MissAV 站点解析：使用播放器和网络请求中的实际清单，不猜测画质路径。"""
 
+import re
 from urllib.parse import urlsplit
 
-from .scraper import UA, BaseScraper
+from .models import PageSnapshot
+from .scraper import BaseScraper
+
+STREAM_PATH = re.compile(
+    r"/([a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})/"
+    r"(?:playlist|([1-9][0-9]*)p/video)\.m3u8",
+    re.IGNORECASE,
+)
+
+
+def _stream_key(url: str) -> tuple[str, int] | None:
+    """仅识别 MissAV 媒体 CDN；返回作品 UUID 与画质，主清单记为 0。"""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return None
+    host = parts.hostname or ""
+    if parts.scheme not in ("http", "https") or not (
+        host == "surrit.com" or host.endswith(".surrit.com")
+    ):
+        return None
+    match = STREAM_PATH.fullmatch(parts.path)
+    if not match:
+        return None
+    return match[1].lower(), int(match[2] or 0)
 
 
 class MissAVScraper(BaseScraper):
-    # 页面内 JSON 转义过的 UUID
-    UUID_PATTERN = r"https:\\/\\/surrit\.com\\/([a-f0-9-]{36})\\/seek\\/_0\.jpg"
-    URL_TEMPLATE = "https://c.surrit.com/{uuid}/720p/video.m3u8"
-
-    def extract(self, html: str) -> tuple[str | None, str | None]:
-        title = self.extract_group(html, r"<title>(.*?)</title>")
+    def extract(self, page: PageSnapshot) -> tuple[str | None, str | None]:
+        title = self.extract_group(page.html, r"<title>(.*?)</title>")
         video_name = title.split(" ")[0] if title else None
         if video_name in ("Jable", "MissAV"):
             video_name = None
 
-        uuid = self.extract_group(html, self.UUID_PATTERN)
-        m3u8_url = self.URL_TEMPLATE.format(uuid=uuid) if uuid else None
-        return m3u8_url, video_name
+        candidates = {
+            url: key
+            for url in [page.player_url, *page.media_urls]
+            if (key := _stream_key(url)) is not None
+        }
+        active = candidates.get(page.player_url)
+        video_ids = {key[0] for key in candidates.values()}
+        # 页面可能同时加载推荐视频；优先定位当前播放器，无法消歧时继续等待。
+        if not active and len(video_ids) != 1:
+            return None, video_name
+        video_id = active[0] if active else next(iter(video_ids))
+        urls = [url for url, key in candidates.items() if key[0] == video_id]
+        # 优先主清单，让 dl-re --auto-select 按实际画质和音轨选择。
+        # 只有子清单时，使用已观察到的最高画质，绝不拼出不存在的 720p 地址。
+        selected = max(
+            urls,
+            key=lambda url: (
+                candidates[url][1] == 0,
+                candidates[url][1],
+                url == page.player_url,
+            ),
+        )
+        return selected, video_name
 
-    def extra_headers(self, page_url: str) -> dict[str, str]:
-        # 防盗链校验的是来源网页，不能把媒体清单自身当作 Referer。
-        page = urlsplit(page_url)
+    def extra_headers(self, page: PageSnapshot) -> dict[str, str]:
+        source = urlsplit(page.url)
+        if (
+            source.scheme not in ("http", "https")
+            or not source.netloc
+            or not page.user_agent
+        ):
+            raise ValueError("未获取到有效的 MissAV 来源页面或浏览器 User-Agent")
         return {
-            "referer": page._replace(fragment="").geturl(),
-            "origin": f"{page.scheme}://{page.netloc}",
-            "user-agent": UA,
+            "referer": source._replace(fragment="").geturl(),
+            "origin": f"{source.scheme}://{source.netloc}",
+            "user-agent": page.user_agent,
         }

@@ -122,7 +122,7 @@ func TestArgs(t *testing.T) {
 		TimeoutSec: 30,
 		MaxSpeed:   "15M",
 		MuxToMP4:   true,
-		Headers:    map[string]string{"user-agent": "UA", "referer": "https://x"},
+		Headers:    map[string]string{"user-agent": "UA", "referer": "https://x/video", "origin": "https://x"},
 	}
 	args := o.Args("https://cdn/x.m3u8")
 
@@ -134,9 +134,10 @@ func TestArgs(t *testing.T) {
 		"--download-retry-count", "20",
 		"--http-request-timeout", "30",
 		"--max-speed", "15M",
-		"--no-ansi-color", "--auto-select",
+		"--no-ansi-color", "--auto-select", "--disable-update-check",
 		"--mux-after-done", "format=mp4",
-		"-H", "referer: https://x",
+		"-H", "origin: https://x",
+		"-H", "referer: https://x/video",
 		"-H", "user-agent: UA",
 	}
 	if !reflect.DeepEqual(args, want) {

@@ -2,6 +2,7 @@
 
 from bs4 import BeautifulSoup
 
+from .models import PageSnapshot
 from .scraper import BaseScraper
 
 # 演员全名所在的属性：静态 HTML 里是 title，页面 JS 用 Bootstrap 初始化 tooltip
@@ -21,7 +22,8 @@ DETAIL_SCOPES = ("section.video-info", ".video-info", ".info-header")
 
 
 class JableScraper(BaseScraper):
-    def extract(self, html: str) -> tuple[str | None, str | None]:
+    def extract(self, page: PageSnapshot) -> tuple[str | None, str | None]:
+        html = page.html
         m3u8_url = self.extract_group(html, r"var hlsUrl = '(.*?)'")
 
         title = self.extract_group(html, r"<title>(.*?)</title>")

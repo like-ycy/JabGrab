@@ -6,14 +6,30 @@
 
 from __future__ import annotations
 
+import json
+from dataclasses import asdict
+
 import pytest
 
 from jab_scrape.jable import JableScraper
 from jab_scrape.missav import MissAVScraper
-from jab_scrape.models import ScrapeResult
+from jab_scrape.models import PageSnapshot, ScrapeResult
 from jab_scrape.scraper import BaseScraper
 
 UUID = "123e4567-e89b-12d3-a456-426614174000"
+MASTER = f"https://c.surrit.com/{UUID}/playlist.m3u8"
+
+
+def snapshot(html, **kwargs):
+    return PageSnapshot(
+        html=html,
+        **{
+            "url": "https://missav.ws/cn/abc-123",
+            "user_agent": "browser-test-agent/1.0",
+            **kwargs,
+        },
+    )
+
 
 JABLE_HTML = """
 <html><head><title>ABC-123 作品标题</title></head>
@@ -94,26 +110,26 @@ JABLE_HTML_TOOLTIP = """
 
 class TestJable:
     def test_extract_ok(self):
-        m3u8, name = JableScraper().extract(JABLE_HTML)
+        m3u8, name = JableScraper().extract(snapshot(JABLE_HTML))
         assert m3u8 == "https://cdn.jable.tv/hls/abc-123.m3u8"
         assert name == "ABC-123"
 
     def test_chinese_subtitle_suffix(self):
-        _, name = JableScraper().extract(JABLE_HTML_FIXED)
+        _, name = JableScraper().extract(snapshot(JABLE_HTML_FIXED))
         assert name == "ABC-123-C"
 
     def test_chinese_subtitle_by_cat_tag(self):
         """分类标签是首选判据：没有那句文案也要认出来。"""
-        _, name = JableScraper().extract(JABLE_HTML_CAT_TAG)
+        _, name = JableScraper().extract(snapshot(JABLE_HTML_CAT_TAG))
         assert name == "ABC-123-C"
 
     def test_cat_tag_outside_detail_ignored(self):
         """导航栏/推荐位的分类链接不算，只有详情区里的才算。"""
-        _, name = JableScraper().extract(JABLE_HTML_NAV_CAT)
+        _, name = JableScraper().extract(snapshot(JABLE_HTML_NAV_CAT))
         assert name == "ABC-123"
 
     def test_chinese_subtitle_absent(self):
-        _, name = JableScraper().extract(JABLE_HTML)
+        _, name = JableScraper().extract(snapshot(JABLE_HTML))
         assert name == "ABC-123"
 
     def test_chinese_subtitle_text_outside_desc_ignored(self):
@@ -122,15 +138,15 @@ class TestJable:
         <html><head><title>ABC-123 作品标题</title></head>
         <body><div class="header-right">中文字幕</div></body></html>
         """
-        _, name = JableScraper().extract(html)
+        _, name = JableScraper().extract(snapshot(html))
         assert name == "ABC-123"
 
     def test_site_title_rejected(self):
         html = "<title>Jable</title>"
-        assert JableScraper().extract(html) == (None, None)
+        assert JableScraper().extract(snapshot(html)) == (None, None)
 
     def test_missing_title(self):
-        assert JableScraper().extract("<html></html>") == (None, None)
+        assert JableScraper().extract(snapshot("<html></html>")) == (None, None)
 
     def test_extract_actors_multiple(self):
         assert JableScraper().extract_actors(JABLE_HTML_WITH_ACTORS) == [
@@ -160,41 +176,125 @@ class TestJable:
 
 
 class TestMissAV:
-    def test_extract_ok(self):
-        m3u8, name = MissAVScraper().extract(MISSAV_HTML)
-        assert m3u8 == f"https://c.surrit.com/{UUID}/720p/video.m3u8"
-        assert name == "ABC-123"
+    def test_prefers_master_over_current_playback_quality(self):
+        page = snapshot(
+            MISSAV_HTML,
+            media_urls=[
+                f"https://c.surrit.com/{UUID}/360p/video.m3u8",
+                MASTER,
+            ],
+        )
+        assert MissAVScraper().extract(page) == (MASTER, "ABC-123")
 
-    def test_no_uuid(self):
-        m3u8, name = MissAVScraper().extract("<title>ABC-123 x</title>")
-        assert m3u8 is None
-        assert name == "ABC-123"
+    def test_uses_player_when_resource_buffer_is_empty(self):
+        assert MissAVScraper().extract(
+            snapshot(
+                MISSAV_HTML,
+                player_url=MASTER,
+            )
+        ) == (MASTER, "ABC-123")
+
+    def test_thumbnail_uuid_does_not_invent_a_stream(self):
+        assert MissAVScraper().extract(snapshot(MISSAV_HTML)) == (None, "ABC-123")
+
+    def test_title_and_network_do_not_need_thumbnail(self):
+        assert MissAVScraper().extract(
+            snapshot(
+                "<title>ABC-123 x</title>",
+                media_urls=[MASTER],
+            )
+        ) == (MASTER, "ABC-123")
+
+    def test_only_observed_variants_choose_highest_and_keep_query(self):
+        highest = f"https://c.surrit.com/{UUID}/1080p/video.m3u8?token=a%2Bb&x=1"
+        page = snapshot(
+            MISSAV_HTML,
+            media_urls=[
+                f"https://c.surrit.com/{UUID}/480p/video.m3u8",
+                highest,
+            ],
+        )
+        assert MissAVScraper().extract(page)[0] == highest
+
+    def test_480p_only_does_not_require_720p(self):
+        url = f"https://c.surrit.com/{UUID}/480p/video.m3u8"
+        assert (
+            MissAVScraper().extract(snapshot(MISSAV_HTML, media_urls=[url]))[0] == url
+        )
+
+    def test_ignores_other_video_when_player_identifies_main(self):
+        other = MASTER.replace(UUID, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        assert (
+            MissAVScraper().extract(
+                snapshot(
+                    MISSAV_HTML,
+                    player_url=MASTER,
+                    media_urls=[other, MASTER],
+                )
+            )[0]
+            == MASTER
+        )
+
+    def test_ambiguous_video_ids_are_not_guessed(self):
+        other = MASTER.replace(UUID, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        assert (
+            MissAVScraper().extract(
+                snapshot(
+                    MISSAV_HTML,
+                    media_urls=[other, MASTER],
+                )
+            )[0]
+            is None
+        )
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://ads.example/playlist.m3u8",
+            MASTER.replace("c.surrit.com", "c.surrit.com.example"),
+            MASTER.replace("https:", "file:"),
+            "blob:" + MASTER,
+            "https://[invalid/playlist.m3u8",
+        ],
+    )
+    def test_ignores_unrelated_and_invalid_urls(self, url):
+        assert (
+            MissAVScraper().extract(snapshot(MISSAV_HTML, media_urls=[url]))[0] is None
+        )
 
     def test_site_title_rejected(self):
-        html = r'<title>MissAV</title>"https:\/\/surrit.com\/' + UUID
-        _, name = MissAVScraper().extract(html)
-        assert name is None
+        assert (
+            MissAVScraper().extract(
+                snapshot(
+                    "<title>MissAV</title>",
+                    media_urls=[MASTER],
+                )
+            )[1]
+            is None
+        )
 
     @pytest.mark.parametrize("origin", ["https://missav.ws", "https://missav.com"])
-    def test_scrape_passes_page_headers_to_downloader(self, monkeypatch, origin):
-        monkeypatch.setattr(
-            BaseScraper,
-            "fetch_html",
-            staticmethod(lambda url, ready=None: MISSAV_HTML),
-        )
-        page_url = f"{origin}/cn/abc-123"
-        result = MissAVScraper().scrape(page_url)
+    def test_scrape_uses_final_page_url_and_actual_browser_agent(
+        self, monkeypatch, origin
+    ):
+        page_url = f"{origin}/cn/abc-123?lang=cn#player"
+        page = snapshot(MISSAV_HTML, url=page_url, media_urls=[MASTER])
+        monkeypatch.setattr(BaseScraper, "fetch_page", staticmethod(lambda url: page))
+        result = MissAVScraper().scrape("https://missav.example/redirect")
         assert result.ok is True
-        assert result.m3u8_url == f"https://c.surrit.com/{UUID}/720p/video.m3u8"
-        assert result.headers["referer"] == page_url
-        assert result.headers["origin"] == origin
-        assert "user-agent" in result.headers
+        assert result.m3u8_url == MASTER
+        assert result.headers == {
+            "referer": f"{origin}/cn/abc-123?lang=cn",
+            "origin": origin,
+            "user-agent": "browser-test-agent/1.0",
+        }
 
-    def test_extra_headers_excludes_page_fragment(self):
-        headers = MissAVScraper().extra_headers("https://missav.ws/cn/abc-123#player")
-        assert headers["referer"] == "https://missav.ws/cn/abc-123"
-        assert headers["origin"] == "https://missav.ws"
-        assert "user-agent" in headers
+    def test_missing_browser_agent_reports_failure(self, monkeypatch):
+        page = snapshot(MISSAV_HTML, user_agent="", media_urls=[MASTER])
+        monkeypatch.setattr(BaseScraper, "fetch_page", staticmethod(lambda url: page))
+        result = MissAVScraper().scrape(page.url)
+        assert not result.ok
+        assert "User-Agent" in result.error
 
 
 class TestBaseScraper:
@@ -204,7 +304,7 @@ class TestBaseScraper:
 
     def test_scrape_fetch_failed(self, monkeypatch):
         monkeypatch.setattr(
-            BaseScraper, "fetch_html", staticmethod(lambda url, ready=None: "")
+            BaseScraper, "fetch_page", staticmethod(lambda url: snapshot(""))
         )
         result = JableScraper().scrape("https://example.com")
         assert result.ok is False
@@ -216,7 +316,7 @@ class TestBaseScraper:
                 raise ValueError("boom")
 
         monkeypatch.setattr(
-            BaseScraper, "fetch_html", staticmethod(lambda url, ready=None: "<html/>")
+            BaseScraper, "fetch_page", staticmethod(lambda url: snapshot("<html/>"))
         )
         result = Boom().scrape("https://example.com")
         assert result.ok is False
@@ -224,7 +324,7 @@ class TestBaseScraper:
 
     def test_scrape_empty_fields(self, monkeypatch):
         monkeypatch.setattr(
-            BaseScraper, "fetch_html", staticmethod(lambda url, ready=None: "<html/>")
+            BaseScraper, "fetch_page", staticmethod(lambda url: snapshot("<html/>"))
         )
         result = JableScraper().scrape("https://example.com")
         assert result.ok is False
@@ -232,7 +332,7 @@ class TestBaseScraper:
 
     def test_scrape_ok(self, monkeypatch):
         monkeypatch.setattr(
-            BaseScraper, "fetch_html", staticmethod(lambda url, ready=None: JABLE_HTML)
+            BaseScraper, "fetch_page", staticmethod(lambda url: snapshot(JABLE_HTML))
         )
         result = JableScraper().scrape("https://example.com")
         assert result.ok is True
@@ -243,8 +343,8 @@ class TestBaseScraper:
     def test_scrape_carries_actors(self, monkeypatch):
         monkeypatch.setattr(
             BaseScraper,
-            "fetch_html",
-            staticmethod(lambda url, ready=None: JABLE_HTML_WITH_ACTORS),
+            "fetch_page",
+            staticmethod(lambda url: snapshot(JABLE_HTML_WITH_ACTORS)),
         )
         result = JableScraper().scrape("https://example.com")
         assert result.ok is True
@@ -258,7 +358,7 @@ class TestBaseScraper:
                 raise ValueError("boom")
 
         monkeypatch.setattr(
-            BaseScraper, "fetch_html", staticmethod(lambda url, ready=None: JABLE_HTML)
+            BaseScraper, "fetch_page", staticmethod(lambda url: snapshot(JABLE_HTML))
         )
         result = Boom().scrape("https://example.com")
         assert result.ok is True
@@ -284,14 +384,17 @@ class TestScrapeResult:
         assert d["actors"] == []
 
 
-class TestFetchHtmlStdoutIsolation:
+class TestFetchPageStdoutIsolation:
     def test_sb_noise_goes_to_stderr(self, monkeypatch, capsys):
         """SB 的 print 噪声不能污染 stdout（Go 侧按单行 JSON 解析）。"""
         from jab_scrape import scraper as mod
 
         class FakeSB:
             def __init__(self, **kwargs):
-                pass
+                self.cdp = self
+
+            def evaluate(self, script):
+                return json.dumps(asdict(snapshot(self.get_page_source())))
 
             def __enter__(self):
                 print("{jab-scrape:10:SB} starts")
@@ -310,17 +413,17 @@ class TestFetchHtmlStdoutIsolation:
                 print("captcha ok")
 
             def get_page_source(self):
-                return "<html>ok</html>"
+                return JABLE_HTML
 
         monkeypatch.setattr(mod, "SB", FakeSB)
-        html = mod.BaseScraper.fetch_html("https://example.com")
+        page = JableScraper().fetch_page("https://example.com")
         captured = capsys.readouterr()
-        assert html == "<html>ok</html>"
+        assert page.html == JABLE_HTML
         assert captured.out == ""
         assert "starts" in captured.err
 
 
-class TestFetchHtmlTiming:
+class TestFetchPageTiming:
     """条件轮询：就绪即走，不再死等固定秒数；超时才解题再等第二轮。"""
 
     @staticmethod
@@ -328,6 +431,10 @@ class TestFetchHtmlTiming:
         class FakeSB:
             def __init__(self, **kwargs):
                 self._i = 0
+                self.cdp = self
+
+            def evaluate(self, script):
+                return json.dumps(asdict(snapshot(self.get_page_source())))
 
             def __enter__(self):
                 return self
@@ -360,10 +467,8 @@ class TestFetchHtmlTiming:
         calls = []
         FakeSB = self._fake_sb(calls, [JABLE_HTML])
         monkeypatch.setattr(mod, "SB", FakeSB)
-        html = mod.BaseScraper.fetch_html(
-            "https://example.com", ready=JableScraper().page_ready
-        )
-        assert html == JABLE_HTML
+        page = JableScraper().fetch_page("https://example.com")
+        assert page.html == JABLE_HTML
         assert calls == [("open", "https://example.com")]
 
     def test_polls_until_ready(self, monkeypatch):
@@ -373,13 +478,37 @@ class TestFetchHtmlTiming:
         calls = []
         FakeSB = self._fake_sb(calls, ["<html>challenge</html>"] * 3 + [JABLE_HTML])
         monkeypatch.setattr(mod, "SB", FakeSB)
-        html = mod.BaseScraper.fetch_html(
-            "https://example.com", ready=JableScraper().page_ready
-        )
-        assert html == JABLE_HTML
+        page = JableScraper().fetch_page("https://example.com")
+        assert page.html == JABLE_HTML
         assert calls == [
             ("open", "https://example.com"),
             ("sleep", mod.POLL_INTERVAL_SEC),
+            ("sleep", mod.POLL_INTERVAL_SEC),
+            ("sleep", mod.POLL_INTERVAL_SEC),
+        ]
+
+    def test_missav_waits_for_media_after_html_is_ready(self, monkeypatch):
+        from jab_scrape import scraper as mod
+
+        calls = []
+        pages = [
+            snapshot(MISSAV_HTML),
+            snapshot(MISSAV_HTML),
+            snapshot(MISSAV_HTML, player_url=MASTER, media_urls=[MASTER]),
+        ]
+
+        class FakeSB(self._fake_sb(calls, [])):
+            def evaluate(self, script):
+                page = pages[min(self._i, len(pages) - 1)]
+                self._i += 1
+                return json.dumps(asdict(page))
+
+        monkeypatch.setattr(mod, "SB", FakeSB)
+        result = MissAVScraper().scrape("https://missav.ws/cn/abc-123")
+        assert result.ok
+        assert result.m3u8_url == MASTER
+        assert calls == [
+            ("open", "https://missav.ws/cn/abc-123"),
             ("sleep", mod.POLL_INTERVAL_SEC),
             ("sleep", mod.POLL_INTERVAL_SEC),
         ]
@@ -399,10 +528,8 @@ class TestFetchHtmlTiming:
                 return JABLE_HTML if state["solved"] else "<html>challenge</html>"
 
         monkeypatch.setattr(mod, "SB", FakeSB)
-        html = mod.BaseScraper.fetch_html(
-            "https://example.com", ready=JableScraper().page_ready
-        )
-        assert html == JABLE_HTML
+        page = JableScraper().fetch_page("https://example.com")
+        assert page.html == JABLE_HTML
         first_round_sleeps = int(mod.PAGE_WAIT_MAX_SEC / mod.POLL_INTERVAL_SEC)
         assert calls == (
             [("open", "https://example.com")]
@@ -417,10 +544,8 @@ class TestFetchHtmlTiming:
         calls = []
         FakeSB = self._fake_sb(calls, ["<html>challenge</html>"])
         monkeypatch.setattr(mod, "SB", FakeSB)
-        html = mod.BaseScraper.fetch_html(
-            "https://example.com", ready=JableScraper().page_ready
-        )
-        assert html == "<html>challenge</html>"
+        page = JableScraper().fetch_page("https://example.com")
+        assert page.html == "<html>challenge</html>"
         total = int(
             (mod.PAGE_WAIT_MAX_SEC + mod.CAPTCHA_WAIT_MAX_SEC) / mod.POLL_INTERVAL_SEC
         )
@@ -443,28 +568,23 @@ class TestFetchHtmlTiming:
                 return JABLE_HTML if state["tried"] else "<html>challenge</html>"
 
         monkeypatch.setattr(mod, "SB", FakeSB)
-        assert (
-            mod.BaseScraper.fetch_html(
-                "https://example.com", ready=JableScraper().page_ready
-            )
-            == JABLE_HTML
-        )
+        assert JableScraper().fetch_page("https://example.com").html == JABLE_HTML
 
 
 class TestPageReady:
     def test_ready_on_parseable_page(self):
-        assert JableScraper().page_ready(JABLE_HTML) is True
+        assert JableScraper().page_ready(snapshot(JABLE_HTML)) is True
 
     def test_not_ready_on_challenge_page(self):
-        assert JableScraper().page_ready("<html>challenge</html>") is False
-        assert JableScraper().page_ready("") is False
+        assert JableScraper().page_ready(snapshot("<html>challenge</html>")) is False
+        assert JableScraper().page_ready(snapshot("")) is False
 
     def test_extract_error_means_not_ready(self):
         class Boom(JableScraper):
             def extract(self, html):
                 raise ValueError("boom")
 
-        assert Boom().page_ready(JABLE_HTML) is False
+        assert Boom().page_ready(snapshot(JABLE_HTML)) is False
 
 
 class TestScrapeErrorPropagation:
@@ -474,7 +594,7 @@ class TestScrapeErrorPropagation:
         def boom(url, ready=None):
             raise RuntimeError("driver crashed")
 
-        monkeypatch.setattr(BaseScraper, "fetch_html", staticmethod(boom))
+        monkeypatch.setattr(BaseScraper, "fetch_page", staticmethod(boom))
         result = JableScraper().scrape("https://example.com")
         assert result.ok is False
         assert "RuntimeError" in result.error
