@@ -638,3 +638,203 @@ func tailOf(s string, n int) string {
 	}
 	return "..." + s[len(s)-n:]
 }
+
+func TestParseSize(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int64
+		ok   bool
+	}{
+		{"959.17MB", 959*(1<<20) + 178*(1<<10), true}, // 近似，只校验量级
+		{"2.09GB", 2244120412, true},
+		{"12KB", 12 * (1 << 10), true},
+		{"2.09GiB", 2244120412, true}, // 与 GB 同口径
+		{"512B", 512, true},
+		{"", 0, false},
+		{"2.09", 0, false},
+		{"N/A", 0, false},
+		{"0MB", 0, false},
+	}
+	for _, c := range cases {
+		got, ok := ParseSize(c.in)
+		if ok != c.ok {
+			t.Fatalf("ParseSize(%q) ok=%v want=%v", c.in, ok, c.ok)
+		}
+		if !ok {
+			continue
+		}
+		// 允许 1% 误差，避免跟浮点换算较劲
+		diff := got - c.want
+		if diff < 0 {
+			diff = -diff
+		}
+		if diff*100 > c.want {
+			t.Fatalf("ParseSize(%q)=%d want≈%d", c.in, got, c.want)
+		}
+	}
+}
+
+// 下载器父进程退出、但后代进程还攥着 stdout 时，Run 必须在上限内返回，
+// 不能因为等不到 EOF 把整轮任务挂死（GR-02）。末尾日志仍要保留。
+func TestRunDrainsWithinGraceWhenDescendantHoldsPipe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("依赖 POSIX shell")
+	}
+
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake-dlre.sh")
+	// sleep 继承了 stdout：父进程退出后写端仍然开着，读端等不到 EOF。
+	body := "#!/bin/sh\necho tail-line\nsleep 30 &\nexit 0\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	old := drainGrace
+	drainGrace = 300 * time.Millisecond
+	t.Cleanup(func() { drainGrace = old })
+
+	var got []string
+	start := time.Now()
+	err := Options{Bin: script, SaveDir: dir, FFmpegPath: "/usr/bin/false"}.
+		Run(context.Background(), "u", nil, func(l string) {
+			got = append(got, l)
+		})
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("收尾超时不应算下载失败: %v", err)
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("应在收尾上限内返回，实际耗时 %s", elapsed)
+	}
+	sawTail, sawWarn := false, false
+	for _, l := range got {
+		if strings.Contains(l, "tail-line") {
+			sawTail = true
+		}
+		if strings.Contains(l, "日志收尾超时") {
+			sawWarn = true
+		}
+	}
+	if !sawTail {
+		t.Fatalf("末尾日志不能丢 got=%v", got)
+	}
+	if !sawWarn {
+		t.Fatalf("收尾超时要在日志里留痕 got=%v", got)
+	}
+}
+
+// 正常退出时不该出现收尾超时，日志也要完整。
+func TestRunNoTeardownWarnOnCleanExit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("依赖 POSIX shell")
+	}
+
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake-dlre.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho a\necho b\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	if err := (Options{Bin: script, SaveDir: dir, FFmpegPath: "/usr/bin/false"}).
+		Run(context.Background(), "u", nil, func(l string) {
+			got = append(got, l)
+		}); err != nil {
+		t.Fatalf("应正常退出: %v", err)
+	}
+	for _, l := range got {
+		if strings.Contains(l, "日志收尾超时") {
+			t.Fatalf("干净退出不应报收尾超时 got=%v", got)
+		}
+	}
+	if len(got) < 2 {
+		t.Fatalf("两行日志都要收到 got=%v", got)
+	}
+}
+
+// 收尾上限只能加在「进程退出之后」：长时间无输出的正常下载不能被它误杀。
+func TestRunWaitsForLongProcessDespiteDrainGrace(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("依赖 POSIX shell")
+	}
+
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake-dlre.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 1\necho done-line\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	old := drainGrace
+	drainGrace = 200 * time.Millisecond
+	t.Cleanup(func() { drainGrace = old })
+
+	var got []string
+	start := time.Now()
+	err := Options{Bin: script, SaveDir: dir, FFmpegPath: "/usr/bin/false"}.
+		Run(context.Background(), "u", nil, func(l string) {
+			got = append(got, l)
+		})
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("长下载不应被判失败: %v", err)
+	}
+	if elapsed < 900*time.Millisecond {
+		t.Fatalf("进程没跑完就返回了，耗时 %s", elapsed)
+	}
+	sawDone := false
+	for _, l := range got {
+		if strings.Contains(l, "done-line") {
+			sawDone = true
+		}
+	}
+	if !sawDone {
+		t.Fatalf("末尾日志必须收到 got=%v", got)
+	}
+}
+
+// 每次 Run 都要把自建的管道读端关掉：管道不再由 exec 代管，
+// 漏关就是每下载一条白占两个 fd，连下几百条会撞上 fd 上限（GR-02 的收尾改造引入的风险）。
+func TestRunClosesPipeFileDescriptors(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("依赖 /dev/fd 或 /proc/self/fd")
+	}
+
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake-dlre.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho hi\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	opts := Options{Bin: script, SaveDir: dir, FFmpegPath: "/usr/bin/false"}
+
+	countFDs := func() (int, bool) {
+		for _, d := range []string{"/proc/self/fd", "/dev/fd"} {
+			if entries, err := os.ReadDir(d); err == nil {
+				return len(entries), true
+			}
+		}
+		return 0, false
+	}
+
+	// 先跑一次，把一次性资源（临时目录扫描等）摊平
+	if err := opts.Run(context.Background(), "u", nil, nil); err != nil {
+		t.Fatalf("首轮应成功: %v", err)
+	}
+	before, ok := countFDs()
+	if !ok {
+		t.Skip("统计不到 fd，跳过")
+	}
+
+	const rounds = 20
+	for i := 0; i < rounds; i++ {
+		if err := opts.Run(context.Background(), "u", nil, nil); err != nil {
+			t.Fatalf("第 %d 轮失败: %v", i, err)
+		}
+	}
+	after, _ := countFDs()
+
+	// 留一点余量：Go 运行时偶尔会临时多开一两个 fd
+	if after-before > 4 {
+		t.Fatalf("管道读端疑似未关闭：fd 从 %d 涨到 %d（%d 轮）", before, after, rounds)
+	}
+}

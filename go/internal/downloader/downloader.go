@@ -247,21 +247,43 @@ func (o Options) Run(
 	cmd.Env = childEnv()
 	proc.Prepare(cmd)
 	cmd.Cancel = func() error { return proc.Kill(cmd) }
-	// kill 失败（进程僵死、管道被子进程持有）时给 Wait 一个兜底超时，
-	// 否则整条流水线永久挂起，「停止」也救不回来。与 scraper 侧对齐。
+	// kill 失败（进程僵死）时给 Wait 一个兜底超时。注意它**管不到**下面的管道：
+	// WaitDelay 只约束 Wait 自身，而管道两端由我们自己持有，见后面 drainReaders。
 	cmd.WaitDelay = 5 * time.Second
 
-	stdout, err := cmd.StdoutPipe()
+	// 管道由自己创建，不用 cmd.StdoutPipe：前者读端归 exec 管，Wait 一返回就被关，
+	// 末尾几行日志会丢；后者又只能「先读到 EOF 再 Wait」，而后代进程接着攥住写端时
+	// 永远等不到 EOF（GR-02，UI 会一直显示运行中）。自有管道两头都在手上：
+	// Wait 不会关它，收尾超时也能主动关掉。
+	outR, outW, err := os.Pipe()
 	if err != nil {
-		return fmt.Errorf("无法读取下载器输出: %w", err)
+		return fmt.Errorf("无法创建下载器输出管道: %w", err)
 	}
-	stderr, err := cmd.StderrPipe()
+	errR, errW, err := os.Pipe()
 	if err != nil {
-		return fmt.Errorf("无法读取下载器错误输出: %w", err)
+		outR.Close()
+		outW.Close()
+		return fmt.Errorf("无法创建下载器错误管道: %w", err)
 	}
+	// 读端在函数返回时关掉：管道是自己建的，没有别人替我们收
+	// （StdoutPipe 时代由 exec 负责）。不关就白占两个 fd，只能等 GC finalizer，
+	// 那属于碰运气，连下几百条时容易撞上 fd 上限。
+	defer outR.Close()
+	defer errR.Close()
+
+	cmd.Stdout = outW
+	cmd.Stderr = errW
+
 	if err := cmd.Start(); err != nil {
+		outW.Close()
+		errW.Close()
+		outR.Close()
+		errR.Close()
 		return fmt.Errorf("启动 N_m3u8DL-RE 失败: %w", err)
 	}
+	// 写端已被子进程继承，父进程这份必须关掉，否则读端永远等不到 EOF。
+	outW.Close()
+	errW.Close()
 
 	tail := proc.NewRing(30)
 
@@ -284,13 +306,13 @@ func (o Options) Run(
 	readOutput := func(r io.Reader, emit func(string)) {
 		err := splitLines(r, emit)
 		if err != nil {
-			// 读协程退出后不能继续让子进程写满管道，否则 Wait 会一直阻塞。
+			// 读协程异常退出后不能继续让子进程写满管道，否则它会一直卡在写上。
 			_ = proc.Kill(cmd)
 		}
 		done <- err
 	}
 	go func() {
-		readOutput(stdout, func(line string) {
+		readOutput(outR, func(line string) {
 			progressFn(line)
 			if !isProgressLine(line) {
 				tail.Push(line)
@@ -299,23 +321,48 @@ func (o Options) Run(
 		})
 	}()
 	go func() {
-		readOutput(stderr, func(line string) {
+		readOutput(errR, func(line string) {
 			tail.Push(line)
 			emit(line)
 		})
 	}()
 
-	readErr, otherReadErr := <-done, <-done
-	waitErr := cmd.Wait()
+	// 进程退出与日志读尽并行观测：Wait 必须在读之前就有人在等，
+	// 否则读端被后代进程攥住时永远走不到 Wait（GR-02 的原始问题）。
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+	waitErr := <-waitCh
+
+	// 到这里进程已经退出，管道里剩下的字节应当毫秒级读完。只有后代进程还攥着
+	// 写端时才会等不到 EOF，这时按上限收尾：关掉我们这一端的读口让读协程立刻
+	// 返回，再把整组杀掉，免得留下孤儿进程。上限只加在「退出之后」，
+	// 正常的长下载不受影响。
+	readErrs, drained := drainReaders(done, 2, drainGrace, func() {
+		outR.Close()
+		errR.Close()
+		_ = proc.Kill(cmd)
+	})
+	if drained {
+		// 日志只收到一部分，但下载本身可能已经完成：让它进入明确终态，
+		// 由上游按产物判定成败，而不是把整轮任务挂死在这里。
+		emit("[warn] 日志收尾超时（可能有子进程仍持有输出管道），已按上限返回")
+	}
 
 	if ctx.Err() != nil {
 		return context.Canceled
 	}
-	if readErr == nil {
-		readErr = otherReadErr
-	}
-	if readErr != nil {
-		return fmt.Errorf("读取下载器日志失败: %w", readErr)
+	if !drained {
+		// 收尾超时时读错误是我们关管道造成的，不能算下载器的问题。
+		var readErr error
+		for _, e := range readErrs {
+			if e != nil {
+				readErr = e
+				break
+			}
+		}
+		if readErr != nil {
+			return fmt.Errorf("读取下载器日志失败: %w", readErr)
+		}
 	}
 	if waitErr != nil {
 		msg := tail.Summary()
@@ -325,6 +372,32 @@ func (o Options) Run(
 		return fmt.Errorf("下载失败: %w", waitErr)
 	}
 	return nil
+}
+
+// drainGrace 是「进程退出/被杀」之后等待日志读尽的时长上限。
+//
+// 单独成变量是为了测试能调小：真实场景 5 秒足够把管道里剩下的字节读完。
+var drainGrace = 5 * time.Second
+
+// drainReaders 等 n 个读协程结束，最多等 grace；到点先 onTimeout 强制收尾，
+// 再收齐剩余结果 —— 不把「日志没读完」变成「函数永远不返回」。
+func drainReaders(done <-chan error, n int, grace time.Duration, onTimeout func()) ([]error, bool) {
+	errs := make([]error, 0, n)
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	for len(errs) < n {
+		select {
+		case err := <-done:
+			errs = append(errs, err)
+		case <-timer.C:
+			onTimeout()
+			for len(errs) < n {
+				errs = append(errs, <-done)
+			}
+			return errs, true
+		}
+	}
+	return errs, false
 }
 
 // ParseProgress 解析一行进度输出。
@@ -368,6 +441,40 @@ func ParseProgress(line string) (Progress, bool) {
 func isProgressLine(line string) bool {
 	_, ok := ParseProgress(line)
 	return ok
+}
+
+// sizeUnitRe 匹配 "959.17MB" / "2.09GB" 这类体积串。
+var sizeUnitRe = regexp.MustCompile(`^([\d.]+)\s*([KMGTP]?i?B)$`)
+
+// ParseSize 把进度里的人类可读体积转成字节数。
+//
+// dl-re 按 1024 进制打印，这里也用 1024；调用方拿它做「成品是否明显偏小」的
+// 粗略校验，阈值留得比较宽，进制差几个百分点不影响结论。
+func ParseSize(s string) (int64, bool) {
+	m := sizeUnitRe.FindStringSubmatch(strings.TrimSpace(s))
+	if m == nil {
+		return 0, false
+	}
+	v, err := strconv.ParseFloat(m[1], 64)
+	if err != nil || v <= 0 {
+		return 0, false
+	}
+	// "GiB" 与 "GB" 都按 1024 进制算：这里只服务于粗判，进制差几个百分点不影响结论。
+	unit := strings.ReplaceAll(strings.ToUpper(m[2]), "I", "")
+	mult := float64(1)
+	switch unit {
+	case "KB":
+		mult = 1 << 10
+	case "MB":
+		mult = 1 << 20
+	case "GB":
+		mult = 1 << 30
+	case "TB":
+		mult = 1 << 40
+	case "PB":
+		mult = 1 << 50
+	}
+	return int64(v * mult), true
 }
 
 // flushBytes 是「没有分隔符时先吐出去」的字节阈值。
