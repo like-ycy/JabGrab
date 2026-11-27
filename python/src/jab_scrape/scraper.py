@@ -9,7 +9,6 @@ import logging
 import re
 import sys
 from abc import ABC, abstractmethod
-from urllib.request import Request, urlopen
 
 from seleniumbase import SB
 
@@ -33,7 +32,7 @@ POLL_INTERVAL_SEC = 0.5
 
 class BaseScraper(ABC):
     def scrape(self, url: str) -> ScrapeResult:
-        """主流程：抓取 -> 解析 -> 修正 -> 组装结果。"""
+        """主流程：抓取 -> 解析 -> 组装下载地址和请求头。"""
         try:
             html = self.fetch_html(url, ready=self.page_ready)
         except Exception as e:
@@ -61,12 +60,11 @@ class BaseScraper(ABC):
             logger.exception("解析演员名出错，按无演员处理")
             actors = []
 
-        m3u8_url = self.fix_m3u8(m3u8_url)
         return ScrapeResult(
             ok=True,
             m3u8_url=m3u8_url,
             video_name=video_name,
-            headers=self.extra_headers(m3u8_url),
+            headers=self.extra_headers(url),
             actors=actors,
         )
 
@@ -128,22 +126,8 @@ class BaseScraper(ABC):
         match = re.search(pattern, content)
         return match.group(1) if match else default
 
-    @staticmethod
-    def url_alive(url: str) -> bool:
-        """HEAD 探活（标准库实现，替代 requests）。"""
-        try:
-            req = Request(url, method="HEAD", headers={"User-Agent": UA})
-            with urlopen(req, timeout=10) as resp:
-                return resp.status == 200
-        except OSError:  # URLError / 超时 / 连接失败均视为不可用
-            return False
-
-    def fix_m3u8(self, url: str) -> str:
-        """钩子方法：子类可修正 m3u8 地址。"""
-        return url
-
-    def extra_headers(self, m3u8_url: str) -> dict[str, str]:
-        """钩子方法：子类可返回下载所需的额外请求头。"""
+    def extra_headers(self, page_url: str) -> dict[str, str]:
+        """根据来源网页生成下载请求头，经 Go 侧透传给 N_m3u8DL-RE。"""
         return {}
 
     def extract_actors(self, html: str) -> list[str]:

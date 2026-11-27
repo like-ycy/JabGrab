@@ -341,6 +341,39 @@ func TestChildEnvAugmentsPath(t *testing.T) {
 	}
 }
 
+func TestRunProvidesTerminfo(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("依赖 POSIX shell；Windows 不修改 TERM")
+	}
+	for _, tc := range []struct{ term, want string }{
+		{"", "xterm-256color"},
+		{"dumb", "xterm-256color"},
+		{"screen-256color", "screen-256color"},
+	} {
+		t.Run(tc.term, func(t *testing.T) {
+			t.Setenv("TERM", tc.term)
+			dir := t.TempDir()
+			bin := filepath.Join(dir, "print-term.sh")
+			if err := os.WriteFile(bin, []byte("#!/bin/sh\nprintf '%s\\n' \"$TERM\"\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			opts := Options{Bin: bin, SaveDir: dir, FFmpegPath: "/usr/bin/false"}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			var lines []string
+			if err := opts.Run(ctx, "unused", nil, func(line string) { lines = append(lines, line) }); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(lines, []string{tc.want}) {
+				t.Fatalf("子进程 TERM 不符: %v，期望 %q", lines, tc.want)
+			}
+			if got := os.Getenv("TERM"); got != tc.term {
+				t.Fatalf("不应修改父进程 TERM: %q", got)
+			}
+		})
+	}
+}
+
 func TestSafeName(t *testing.T) {
 	cases := map[string]string{
 		"CJOD-548-C":      "CJOD-548-C",

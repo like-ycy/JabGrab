@@ -1,6 +1,6 @@
 """解析逻辑离线测试：不启动浏览器，不访问网络。
 
-覆盖 jable / missav 的 extract、fix_m3u8、extra_headers，
+覆盖 jable / missav 的 extract、extra_headers，
 以及 BaseScraper 主流程的失败分支。
 """
 
@@ -162,7 +162,7 @@ class TestJable:
 class TestMissAV:
     def test_extract_ok(self):
         m3u8, name = MissAVScraper().extract(MISSAV_HTML)
-        assert m3u8 == f"https://surrit.com/{UUID}/720p/video.m3u8"
+        assert m3u8 == f"https://c.surrit.com/{UUID}/720p/video.m3u8"
         assert name == "ABC-123"
 
     def test_no_uuid(self):
@@ -175,20 +175,25 @@ class TestMissAV:
         _, name = MissAVScraper().extract(html)
         assert name is None
 
-    def test_fix_m3u8_fallback(self, monkeypatch):
-        monkeypatch.setattr(BaseScraper, "url_alive", staticmethod(lambda url: False))
-        url = MissAVScraper().fix_m3u8(f"https://surrit.com/{UUID}/720p/video.m3u8")
-        assert url == f"https://surrit.com/{UUID}/1280x720/video.m3u8"
+    @pytest.mark.parametrize("origin", ["https://missav.ws", "https://missav.com"])
+    def test_scrape_passes_page_headers_to_downloader(self, monkeypatch, origin):
+        monkeypatch.setattr(
+            BaseScraper,
+            "fetch_html",
+            staticmethod(lambda url, ready=None: MISSAV_HTML),
+        )
+        page_url = f"{origin}/cn/abc-123"
+        result = MissAVScraper().scrape(page_url)
+        assert result.ok is True
+        assert result.m3u8_url == f"https://c.surrit.com/{UUID}/720p/video.m3u8"
+        assert result.headers["referer"] == page_url
+        assert result.headers["origin"] == origin
+        assert "user-agent" in result.headers
 
-    def test_fix_m3u8_keeps_alive_url(self, monkeypatch):
-        monkeypatch.setattr(BaseScraper, "url_alive", staticmethod(lambda url: True))
-        url = f"https://surrit.com/{UUID}/720p/video.m3u8"
-        assert MissAVScraper().fix_m3u8(url) == url
-
-    def test_extra_headers(self):
-        url = f"https://surrit.com/{UUID}/720p/video.m3u8"
-        headers = MissAVScraper().extra_headers(url)
-        assert headers["referer"] == url
+    def test_extra_headers_excludes_page_fragment(self):
+        headers = MissAVScraper().extra_headers("https://missav.ws/cn/abc-123#player")
+        assert headers["referer"] == "https://missav.ws/cn/abc-123"
+        assert headers["origin"] == "https://missav.ws"
         assert "user-agent" in headers
 
 

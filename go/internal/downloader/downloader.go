@@ -90,7 +90,7 @@ func FindFFmpeg(near ...string) string {
 	return ""
 }
 
-// childEnv 返回补全了常见 bin 目录的 PATH。
+// childEnv 补全工具路径和无终端环境下下载器需要的 terminfo。
 func childEnv() []string {
 	env := os.Environ()
 	current := os.Getenv("PATH")
@@ -107,12 +107,20 @@ func childEnv() []string {
 	}
 	merged := strings.Join(parts, string(os.PathListSeparator))
 
-	out := make([]string, 0, len(env)+1)
+	// Unix 下 dl-re 0.6.0 即使输出到管道也会绘制进度条。TERM=dumb 的
+	// terminfo 没有有效行数，.NET/Spectre 会在裁剪进度条时抛 RemoveRange 异常。
+	// 仅为无终端环境补齐 TERM；正常终端配置及父进程环境保持不变。
+	term := os.Getenv("TERM")
+	setTerm := runtime.GOOS != "windows" && (term == "" || term == "dumb")
+	out := make([]string, 0, len(env)+2)
 	for _, kv := range env {
-		if strings.HasPrefix(kv, "PATH=") {
+		if strings.HasPrefix(kv, "PATH=") || (setTerm && strings.HasPrefix(kv, "TERM=")) {
 			continue
 		}
 		out = append(out, kv)
+	}
+	if setTerm {
+		out = append(out, "TERM=xterm-256color")
 	}
 	return append(out, "PATH="+merged)
 }
