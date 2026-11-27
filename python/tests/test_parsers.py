@@ -513,6 +513,57 @@ class TestFetchPageTiming:
             ("sleep", mod.POLL_INTERVAL_SEC),
         ]
 
+    def test_empty_document_during_navigation_is_polled(self, monkeypatch):
+        from jab_scrape import scraper as mod
+
+        calls = []
+        monkeypatch.setattr(mod, "SB", self._fake_sb(calls, ["", "", JABLE_HTML]))
+        result = JableScraper().scrape("https://example.com")
+        assert result.ok
+        assert result.video_name == "ABC-123"
+        assert calls.count(("sleep", mod.POLL_INTERVAL_SEC)) == 2
+        assert not any(call[0] == "captcha" for call in calls)
+
+    def test_browser_exception_is_reported_as_json_failure(self, monkeypatch, capsys):
+        from jab_scrape import __main__ as cli
+        from jab_scrape import scraper as mod
+
+        class FailingSB(self._fake_sb([], [])):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                # 与 SeleniumBase 的 test 模式一致：默认会吞掉异常。
+                self.raise_failure = kwargs.get("raise_test_failure", False)
+
+            def evaluate(self, script):
+                raise RuntimeError("CDP connection closed")
+
+            def __exit__(self, *exc):
+                return not self.raise_failure
+
+        monkeypatch.setattr(mod, "SB", FailingSB)
+        assert cli.main(["https://example.com", "--source", "missav"]) == 1
+        result = json.loads(capsys.readouterr().out)
+        assert result["ok"] is False
+        assert "RuntimeError: CDP connection closed" in result["error"]
+        assert "NoneType" not in result["error"]
+
+    def test_missing_snapshot_from_context_manager_is_explicit_failure(
+        self, monkeypatch
+    ):
+        from jab_scrape import scraper as mod
+
+        class SwallowingSB(self._fake_sb([], [])):
+            def evaluate(self, script):
+                raise RuntimeError("unexpected suppressed error")
+
+            def __exit__(self, *exc):
+                return True
+
+        monkeypatch.setattr(mod, "SB", SwallowingSB)
+        result = MissAVScraper().scrape("https://example.com")
+        assert not result.ok
+        assert "浏览器未返回页面快照" in result.error
+
     def test_captcha_only_after_first_window_exhausted(self, monkeypatch):
         """第一轮等满上限仍不就绪才解题；解题后就绪立刻返回。"""
         from jab_scrape import scraper as mod

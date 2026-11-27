@@ -2,7 +2,10 @@ package main
 
 import (
 	"embed"
+	"fmt"
 	"os"
+
+	"jabgrab/internal/version"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -14,6 +17,10 @@ import (
 var assets embed.FS
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--version" {
+		fmt.Println(version.Version)
+		return
+	}
 	// 不开窗口，只报告运行时定位结果（用于验证发行目录）
 	if len(os.Args) > 1 && (os.Args[1] == "--selftest" || os.Args[1] == "-selftest") {
 		os.Exit(selfTest())
@@ -37,7 +44,7 @@ func main() {
 		Mac: &mac.Options{
 			TitleBar: mac.TitleBarDefault(),
 			About: &mac.AboutInfo{
-				Title:   "JabGrab",
+				Title:   "JabGrab " + version.Version,
 				Message: "m3u8 抓取与下载",
 			},
 		},

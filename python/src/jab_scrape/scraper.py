@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # 在同一次 JS 求值中采样，避免重定向前后的源码、URL 与请求头混用。
 # hls.url 是 Hls.js 当前播放器的清单；resource entries 对应 Network 中的请求。
 PAGE_SNAPSHOT_SCRIPT = r"""JSON.stringify({
-    html: document.documentElement.outerHTML,
+    html: document.documentElement?.outerHTML || '',
     url: location.href,
     user_agent: navigator.userAgent,
     player_url: typeof window.hls?.url === 'string' ? window.hls.url : '',
@@ -87,9 +87,16 @@ class BaseScraper(ABC):
         转成带类名的错误信息。
         """
         logger.info("正在获取网页源码: %s", url)
+        page = None
         with (
             contextlib.redirect_stdout(sys.stderr),
-            SB(uc=True, test=True, locale="en", headless=True) as sb,
+            SB(
+                uc=True,
+                test=True,
+                raise_test_failure=True,
+                locale="en",
+                headless=True,
+            ) as sb,
         ):
             sb.activate_cdp_mode(url)
             page = self._wait_ready(sb, PAGE_WAIT_MAX_SEC)
@@ -100,7 +107,9 @@ class BaseScraper(ABC):
                     # 页面本来就没有验证码时，个别版本会抛错；能取到源码就不算失败
                     logger.debug("solve_captcha 跳过", exc_info=True)
                 page = self._wait_ready(sb, CAPTCHA_WAIT_MAX_SEC)
-            return page
+        if page is None:
+            raise RuntimeError("浏览器未返回页面快照")
+        return page
 
     def _wait_ready(self, sb, budget_sec: float) -> PageSnapshot:
         """按 POLL_INTERVAL_SEC 轮询页面快照，直到就绪或耗尽预算。"""

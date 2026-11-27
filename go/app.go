@@ -21,6 +21,7 @@ import (
 	"jabgrab/internal/player"
 	"jabgrab/internal/proc"
 	"jabgrab/internal/reveal"
+	"jabgrab/internal/version"
 )
 
 // LogLine 是推给前端的一行日志。
@@ -31,6 +32,7 @@ type LogLine struct {
 
 // BootInfo 是前端启动时拿到的全部环境信息。
 type BootInfo struct {
+	AppVersion string        `json:"appVersion"`
 	Config     config.Config `json:"config"`
 	ConfigPath string        `json:"configPath"`
 	Issues     []string      `json:"issues"`
@@ -137,7 +139,7 @@ func (a *App) Boot() BootInfo {
 	runner := a.runner
 	a.mu.Unlock()
 
-	info := BootInfo{Config: cfg}
+	info := BootInfo{Config: cfg, AppVersion: version.Version}
 	if p, err := config.Path(); err == nil {
 		info.ConfigPath = p
 	}

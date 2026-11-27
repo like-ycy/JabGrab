@@ -91,11 +91,10 @@ async function boot() {
     });
     window.runtime.EventsOn("component:refreshed", () => refreshComponents());
 
-    // 下载器版本是后台异步探测的，探测完成后补进徽标。
+    // 下载器版本是独立组件的信息，不能覆盖应用版本。
     window.runtime.EventsOn("dlr:version", (v) => {
         if (!v || !v.version) return;
-        const badge = el("envBadge");
-        if (badge.classList.contains("ok")) badge.textContent = v.version;
+        appendLog({ level: "info", text: `下载器版本：${v.version}` });
     });
 }
 
@@ -183,13 +182,14 @@ function bindPaneDivider() {
 function renderEnv(info) {
     const badge = el("envBadge");
     const issues = info.issues || [];
+    badge.textContent = `v${info.appVersion}`;
 
     if (issues.length === 0) {
-        badge.textContent = info.dlrVersion || "环境就绪";
+        badge.title = "JabGrab 应用版本 · 环境就绪";
         badge.className = "env ok";
         el("issueBanner").classList.add("hidden");
     } else {
-        badge.textContent = `${issues.length} 项待处理`;
+        badge.title = `JabGrab 应用版本 · ${issues.length} 项待处理`;
         badge.className = "env bad";
         const banner = el("issueBanner");
         banner.textContent = issues.map((s) => "· " + s).join("\n");

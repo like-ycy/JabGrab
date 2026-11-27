@@ -7,6 +7,7 @@ import (
 
 	"jabgrab/internal/config"
 	"jabgrab/internal/locate"
+	"jabgrab/internal/version"
 )
 
 // selfTest 打印运行时定位结果并以退出码反映可用性。
@@ -24,6 +25,7 @@ func selfTest() int {
 
 	code := 0
 	fmt.Println("== JabGrab 自检 ==")
+	fmt.Println("应用版本:", version.Version)
 
 	if p, err := config.Path(); err == nil {
 		fmt.Println("配置文件:", p)

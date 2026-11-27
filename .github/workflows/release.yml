@@ -69,6 +69,11 @@ jobs:
           go-version-file: go/go.mod
           cache-dependency-path: go/go.sum
 
+      - name: Windows 进程停止回归测试
+        if: runner.os == 'Windows'
+        working-directory: go
+        run: go test ./internal/proc -v -timeout 90s
+
       - uses: astral-sh/setup-uv@v10.3.3  # 该 action 不维护浮动主版本标签，只能写完整版本
         with:
           # enable-cache 默认 auto，tag 推送时不会启用缓存，这里显式打开
