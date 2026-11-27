@@ -129,7 +129,11 @@ jobs:
           if [ -n "$stray" ]; then echo "整包顶层不是单一的 JabGrab/：$stray"; exit 1; fi
 
           # 标准包必须不含 tools/：它是「拷组件之前的那棵树」。
-          if unzip -Z1 "$lite" | grep -q '^JabGrab/tools/'; then
+          # 先落名单再用 here-string：`unzip | grep -q` 里 grep 一命中就退出，
+          # unzip 被 SIGPIPE 顶死（141），pipefail 下这个检查会静默通过 ——
+          # 越是有问题越查不出来。
+          names_lite="$(unzip -Z1 "$lite")"
+          if grep -q '^JabGrab/tools/' <<<"$names_lite"; then
             echo "标准包里出现了 tools/"; exit 1
           fi
 
