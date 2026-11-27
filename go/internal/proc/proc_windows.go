@@ -12,6 +12,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -111,17 +112,40 @@ func terminateTree(pid int) error {
 	if killErr != nil {
 		// Windows 对已终止但仍有句柄的进程也会返回 Access denied。
 		// 只有内核确认退出才算完成，绝不把实际的权限错误一概忽略。
-		_, _ = processExited(handle, 1000)
-		if allExited() {
-			return nil
+		deadline := time.Now().Add(time.Second)
+		for {
+			if allExited() {
+				return nil
+			}
+			if inspectErr != nil || time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
 		}
 		if ctx.Err() != nil {
 			killErr = ctx.Err()
 		}
 		// 不退回只杀父进程：那会留下浏览器/ffmpeg，同时丢失 taskkill 的原因。
-		return fmt.Errorf("终止进程树 %d 失败: %w; taskkill: %s", pid, errors.Join(killErr, inspectErr), strings.TrimSpace(string(output)))
+		return fmt.Errorf("终止进程树 %d 失败: %w; taskkill: %s", pid, errors.Join(killErr, inspectErr), decodeTaskkillOutput(output, 1))
 	}
 	return nil
+}
+
+// CREATE_NO_WINDOW 下系统命令通常输出 OEM 代码页（CP_OEMCP=1），不是 UTF-8。
+// 不改变全局控制台代码页；只在接入 UTF-8 日志前解码本次命令的原始字节。
+func decodeTaskkillOutput(raw []byte, codePage uint32) string {
+	if utf8.Valid(raw) {
+		return strings.TrimSpace(string(raw))
+	}
+	n, err := windows.MultiByteToWideChar(codePage, 0, &raw[0], int32(len(raw)), nil, 0)
+	if err != nil {
+		return fmt.Sprintf("无法解码代码页 %d 的命令输出: %x", codePage, raw)
+	}
+	wide := make([]uint16, n)
+	if _, err := windows.MultiByteToWideChar(codePage, 0, &raw[0], int32(len(raw)), &wide[0], n); err != nil {
+		return fmt.Sprintf("无法解码代码页 %d 的命令输出: %x", codePage, raw)
+	}
+	return strings.TrimSpace(windows.UTF16ToString(wide))
 }
 
 // childProcessHandles 保存停止前的后代句柄。失败时也必须确认这些后代已经退出，

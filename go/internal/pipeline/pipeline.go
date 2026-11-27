@@ -520,16 +520,17 @@ func (r *Runner) downloadPhase(
 	// 当前下载器进程的 pid，用来在收尾时从「停止」的射程里划掉。
 	var child int
 	opts := downloader.Options{
-		Bin:        t.dlrPath,
-		SaveDir:    saveDir,
-		SaveName:   name,
-		Threads:    cfg.Download.Threads,
-		RetryCount: cfg.Download.RetryCount,
-		TimeoutSec: cfg.Download.TimeoutSec,
-		MaxSpeed:   cfg.Download.MaxSpeed,
-		MuxToMP4:   cfg.Download.MuxToMP4,
-		FFmpegPath: t.ffmpegPath,
-		Headers:    res.Headers,
+		Bin:           t.dlrPath,
+		SaveDir:       saveDir,
+		SaveName:      name,
+		Threads:       cfg.Download.Threads,
+		RetryCount:    cfg.Download.RetryCount,
+		TimeoutSec:    cfg.Download.TimeoutSec,
+		MaxSpeed:      cfg.Download.MaxSpeed,
+		MuxToMP4:      cfg.Download.MuxToMP4,
+		FFmpegPath:    t.ffmpegPath,
+		Headers:       res.Headers,
+		CurlTransport: r.item(idx).Site == "missav",
 		// 记下下载器进程：按下「停止」时直接杀这个进程组（含它派生的 ffmpeg）。
 		OnStart: func(pid int) {
 			child = pid

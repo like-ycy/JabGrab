@@ -18,6 +18,7 @@ from jab_scrape.scraper import BaseScraper
 
 UUID = "123e4567-e89b-12d3-a456-426614174000"
 MASTER = f"https://c.surrit.com/{UUID}/playlist.m3u8"
+VIDEO = f"https://c.surrit.com/{UUID}/720p/video.m3u8"
 
 
 def snapshot(html, **kwargs):
@@ -176,23 +177,33 @@ class TestJable:
 
 
 class TestMissAV:
-    def test_prefers_master_over_current_playback_quality(self):
+    def test_master_address_alone_is_not_ready(self):
+        page = snapshot(MISSAV_HTML, player_url=MASTER, media_urls=[MASTER])
+        assert MissAVScraper().extract(page) == (None, "ABC-123")
+        assert not MissAVScraper().page_ready(page)
+
+    def test_only_unrelated_variants_do_not_complete_main_video(self):
+        other = VIDEO.replace(UUID, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        page = snapshot(MISSAV_HTML, player_url=MASTER, variant_urls=[other])
+        assert not MissAVScraper().page_ready(page)
+
+    def test_chooses_highest_variant_over_current_playback_quality(self):
         page = snapshot(
             MISSAV_HTML,
-            media_urls=[
-                f"https://c.surrit.com/{UUID}/360p/video.m3u8",
-                MASTER,
-            ],
+            player_url=MASTER,
+            variant_urls=[f"https://c.surrit.com/{UUID}/360p/video.m3u8", VIDEO],
+            media_urls=[f"https://c.surrit.com/{UUID}/360p/video.m3u8", MASTER],
         )
-        assert MissAVScraper().extract(page) == (MASTER, "ABC-123")
+        assert MissAVScraper().extract(page) == (VIDEO, "ABC-123")
 
-    def test_uses_player_when_resource_buffer_is_empty(self):
+    def test_uses_parsed_variants_when_resource_buffer_is_empty(self):
         assert MissAVScraper().extract(
             snapshot(
                 MISSAV_HTML,
                 player_url=MASTER,
+                variant_urls=[VIDEO],
             )
-        ) == (MASTER, "ABC-123")
+        ) == (VIDEO, "ABC-123")
 
     def test_thumbnail_uuid_does_not_invent_a_stream(self):
         assert MissAVScraper().extract(snapshot(MISSAV_HTML)) == (None, "ABC-123")
@@ -201,9 +212,9 @@ class TestMissAV:
         assert MissAVScraper().extract(
             snapshot(
                 "<title>ABC-123 x</title>",
-                media_urls=[MASTER],
+                media_urls=[VIDEO],
             )
-        ) == (MASTER, "ABC-123")
+        ) == (VIDEO, "ABC-123")
 
     def test_only_observed_variants_choose_highest_and_keep_query(self):
         highest = f"https://c.surrit.com/{UUID}/1080p/video.m3u8?token=a%2Bb&x=1"
@@ -223,25 +234,25 @@ class TestMissAV:
         )
 
     def test_ignores_other_video_when_player_identifies_main(self):
-        other = MASTER.replace(UUID, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        other = VIDEO.replace(UUID, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
         assert (
             MissAVScraper().extract(
                 snapshot(
                     MISSAV_HTML,
                     player_url=MASTER,
-                    media_urls=[other, MASTER],
+                    media_urls=[other, VIDEO],
                 )
             )[0]
-            == MASTER
+            == VIDEO
         )
 
     def test_ambiguous_video_ids_are_not_guessed(self):
-        other = MASTER.replace(UUID, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        other = VIDEO.replace(UUID, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
         assert (
             MissAVScraper().extract(
                 snapshot(
                     MISSAV_HTML,
-                    media_urls=[other, MASTER],
+                    media_urls=[other, VIDEO],
                 )
             )[0]
             is None
@@ -251,9 +262,9 @@ class TestMissAV:
         "url",
         [
             "https://ads.example/playlist.m3u8",
-            MASTER.replace("c.surrit.com", "c.surrit.com.example"),
-            MASTER.replace("https:", "file:"),
-            "blob:" + MASTER,
+            VIDEO.replace("c.surrit.com", "c.surrit.com.example"),
+            VIDEO.replace("https:", "file:"),
+            "blob:" + VIDEO,
             "https://[invalid/playlist.m3u8",
         ],
     )
@@ -278,11 +289,11 @@ class TestMissAV:
         self, monkeypatch, origin
     ):
         page_url = f"{origin}/cn/abc-123?lang=cn#player"
-        page = snapshot(MISSAV_HTML, url=page_url, media_urls=[MASTER])
+        page = snapshot(MISSAV_HTML, url=page_url, media_urls=[VIDEO])
         monkeypatch.setattr(BaseScraper, "fetch_page", staticmethod(lambda url: page))
         result = MissAVScraper().scrape("https://missav.example/redirect")
         assert result.ok is True
-        assert result.m3u8_url == MASTER
+        assert result.m3u8_url == VIDEO
         assert result.headers == {
             "referer": f"{origin}/cn/abc-123?lang=cn",
             "origin": origin,
@@ -290,7 +301,7 @@ class TestMissAV:
         }
 
     def test_missing_browser_agent_reports_failure(self, monkeypatch):
-        page = snapshot(MISSAV_HTML, user_agent="", media_urls=[MASTER])
+        page = snapshot(MISSAV_HTML, user_agent="", media_urls=[VIDEO])
         monkeypatch.setattr(BaseScraper, "fetch_page", staticmethod(lambda url: page))
         result = MissAVScraper().scrape(page.url)
         assert not result.ok
@@ -494,7 +505,12 @@ class TestFetchPageTiming:
         pages = [
             snapshot(MISSAV_HTML),
             snapshot(MISSAV_HTML),
-            snapshot(MISSAV_HTML, player_url=MASTER, media_urls=[MASTER]),
+            snapshot(
+                MISSAV_HTML,
+                player_url=MASTER,
+                media_urls=[MASTER],
+                variant_urls=[VIDEO],
+            ),
         ]
 
         class FakeSB(self._fake_sb(calls, [])):
@@ -506,7 +522,7 @@ class TestFetchPageTiming:
         monkeypatch.setattr(mod, "SB", FakeSB)
         result = MissAVScraper().scrape("https://missav.ws/cn/abc-123")
         assert result.ok
-        assert result.m3u8_url == MASTER
+        assert result.m3u8_url == VIDEO
         assert calls == [
             ("open", "https://missav.ws/cn/abc-123"),
             ("sleep", mod.POLL_INTERVAL_SEC),

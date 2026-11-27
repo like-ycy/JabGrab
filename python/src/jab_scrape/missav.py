@@ -39,24 +39,26 @@ class MissAVScraper(BaseScraper):
 
         candidates = {
             url: key
-            for url in [page.player_url, *page.media_urls]
-            if (key := _stream_key(url)) is not None
+            for url in [*page.variant_urls, *page.media_urls]
+            if (key := _stream_key(url)) is not None and key[1] > 0
         }
-        active = candidates.get(page.player_url)
+        active = _stream_key(page.player_url)
         video_ids = {key[0] for key in candidates.values()}
         # 页面可能同时加载推荐视频；优先定位当前播放器，无法消歧时继续等待。
         if not active and len(video_ids) != 1:
             return None, video_name
         video_id = active[0] if active else next(iter(video_ids))
         urls = [url for url, key in candidates.items() if key[0] == video_id]
-        # 优先主清单，让 dl-re --auto-select 按实际画质和音轨选择。
-        # 只有子清单时，使用已观察到的最高画质，绝不拼出不存在的 720p 地址。
+        if not urls:
+            # hls.url 在请求主清单之前就已设置，不能据此认为媒体解析成功。
+            return None, video_name
+        # 画质由浏览器实际解析的列表决定；下载器直接读取分片清单，
+        # 与已验证的手动下载流程一致，不再重新请求主清单或拼出固定 720p。
         selected = max(
             urls,
             key=lambda url: (
-                candidates[url][1] == 0,
                 candidates[url][1],
-                url == page.player_url,
+                url in page.variant_urls,
             ),
         )
         return selected, video_name

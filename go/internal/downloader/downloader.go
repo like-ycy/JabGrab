@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"jabgrab/internal/curlrelay"
 	"jabgrab/internal/proc"
 )
 
@@ -38,16 +39,17 @@ type Progress struct {
 
 // Options 是一次下载的全部参数，来自配置。
 type Options struct {
-	Bin        string
-	SaveDir    string
-	SaveName   string
-	Threads    int
-	RetryCount int
-	TimeoutSec int
-	MaxSpeed   string
-	MuxToMP4   bool
-	FFmpegPath string // 显式指定 ffmpeg，空则由 dl-re 自行查找
-	Headers    map[string]string
+	Bin           string
+	SaveDir       string
+	SaveName      string
+	Threads       int
+	RetryCount    int
+	TimeoutSec    int
+	MaxSpeed      string
+	MuxToMP4      bool
+	FFmpegPath    string // 显式指定 ffmpeg，空则由 dl-re 自行查找
+	Headers       map[string]string
+	CurlTransport bool // MissAV 请求经本机 curl 转发，解析/进度/混流仍交给 dl-re。
 	// OnStart 在子进程起来之后回调一次，参数是它的 pid（同时是进程组号）。
 	// 流水线据此把「当前在跑的下载器」记在案，停止时直接杀组，
 	// 不必等 ctx 取消传到 exec 的取消回调。
@@ -174,6 +176,10 @@ func (o Options) Args(m3u8 string) []string {
 
 	// 去掉 ANSI 控制符，否则捕获到的 stdout 充满转义序列，无法解析进度。
 	args = append(args, "--no-ansi-color", "--auto-select", "--disable-update-check")
+	if o.CurlTransport {
+		// 转发入口在 loopback，不能让下载器把本机请求交给系统代理。
+		args = append(args, "--use-system-proxy", "false")
+	}
 
 	// ffmpeg 是 dl-re 的启动期硬依赖（缺了直接抛异常退出），与是否混流无关，
 	// 所以只要拿到路径就显式传入，避免依赖子进程自己去 PATH 里找。
@@ -203,7 +209,7 @@ func (o Options) Args(m3u8 string) []string {
 func (o Options) Run(
 	ctx context.Context, m3u8 string,
 	onProgress func(Progress), onLog func(string),
-) error {
+) (runErr error) {
 	if o.Bin == "" {
 		return fmt.Errorf("未指定 N_m3u8DL-RE 路径")
 	}
@@ -244,6 +250,24 @@ func (o Options) Run(
 	emit := func(string) {}
 	if onLog != nil {
 		emit = onLog
+	}
+	if o.CurlTransport {
+		relay, err := curlrelay.Start(ctx, curlrelay.Options{
+			URL: m3u8, Headers: o.Headers, Concurrency: o.Threads,
+			Timeout: time.Duration(o.TimeoutSec) * time.Second,
+		})
+		if err != nil {
+			return err
+		}
+		defer func() {
+			relay.Close()
+			if runErr != nil && ctx.Err() == nil && relay.Err() != nil {
+				runErr = fmt.Errorf("%w；媒体请求: %v", runErr, relay.Err())
+			}
+		}()
+		m3u8 = relay.URL()
+		o.Headers = nil // 来源请求头只由 curl 发给媒体站点。
+		emit("MissAV 使用系统 curl 获取媒体（HTTP/1.1，不叠加应用代理；TUN 仍由系统路由控制）")
 	}
 
 	cmd := exec.CommandContext(ctx, bin, o.Args(m3u8)...) //nolint:gosec // 路径与参数均来自本地配置

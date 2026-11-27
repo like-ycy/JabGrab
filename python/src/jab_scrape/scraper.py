@@ -24,6 +24,10 @@ PAGE_SNAPSHOT_SCRIPT = r"""JSON.stringify({
     url: location.href,
     user_agent: navigator.userAgent,
     player_url: typeof window.hls?.url === 'string' ? window.hls.url : '',
+    variant_urls: Array.isArray(window.hls?.levels)
+        ? window.hls.levels.flatMap(level => Array.isArray(level.url)
+            ? level.url : typeof level.url === 'string' ? [level.url] : [])
+        : [],
     media_urls: [...new Set(performance.getEntriesByType('resource')
         .map(entry => entry.name).filter(url => /\.m3u8(?:[?#]|$)/i.test(url)))]
 })"""

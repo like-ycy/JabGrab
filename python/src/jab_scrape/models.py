@@ -13,6 +13,8 @@ class PageSnapshot:
     user_agent: str
     player_url: str = ""
     media_urls: list[str] = field(default_factory=list)
+    # Hls.js 已解析出的画质列表，与仅设置了地址的 player_url 区分。
+    variant_urls: list[str] = field(default_factory=list)
 
 
 @dataclass
