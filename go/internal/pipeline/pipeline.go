@@ -472,8 +472,8 @@ func (r *Runner) downloadPhase(
 	name := downloader.SafeName(res.VideoName)
 
 	// 有演员名就归档到「保存目录/演员名」下（多个演员用横线连接）；
-	// 取不到演员名（missav、或页面上没有演员信息）时直接放保存目录根，
-	// 不额外套一层「未知演员」，免得所有 missav 全挤在一个目录里。
+	// 取不到演员名（页面上没有演员信息或解析失败）时直接放保存目录根，
+	// 不额外套一层「未知演员」。
 	actorDir := downloader.ActorDir(res.Actors)
 	saveDir := cfg.SaveDir
 	if actorDir != "" {
@@ -483,9 +483,9 @@ func (r *Runner) downloadPhase(
 
 	// 下载前先看本地有没有这部片子的成品。结论对用户是要紧的（为什么没下载），
 	// 所以命中与未命中都写日志：只在跳过时打一行的话，日志里看不出检查到底做没做，
-	// 也看不出命中的是普通版还是中文字幕版。
+	// 也看不出命中的是普通版、中文字幕版还是无码版。
 	if exists := r.findExistingVersion(cfg.SaveDir, saveDir, name); exists != "" {
-		// 跳过时不做任何删除：删除只在本次真的下完中文字幕版之后做。
+		// 跳过时不做任何删除：删除只在本次真的下完并验证 -C/-U 版之后做。
 		r.patch(tok, idx, func(it *Item) {
 			it.Status = StatusSkipped
 			it.Message = "已存在: " + filepath.Base(exists)
@@ -495,7 +495,7 @@ func (r *Runner) downloadPhase(
 		r.logf("info", fmt.Sprintf("[%d/%d] 本地已有成品，跳过下载：%s", idx+1, total, describeFile(exists)))
 		return nil
 	}
-	r.logf("info", fmt.Sprintf("[%d/%d] 本地没有同名成品（含 -C 中文字幕版），开始下载", idx+1, total))
+	r.logf("info", fmt.Sprintf("[%d/%d] 本地没有可接受的同名成品，开始下载", idx+1, total))
 
 	r.patch(tok, idx, func(it *Item) {
 		it.Status = StatusDownloading
@@ -593,7 +593,7 @@ func (r *Runner) downloadPhase(
 	}
 	r.mu.Unlock()
 
-	// 中文字幕版到这里才算「已提交」。只有已提交的新产物才允许触发旧档清理，
+	// 新版到这里才算「已提交」。只有已提交的 -C/-U 产物才允许触发普通版旧档清理，
 	// 清理时也直接用它当参照，不再去目录里重新找一遍。
 	if plain, ok := plainName(name); ok {
 		r.dropPlainVideo(idx+1, total, cfg.SaveDir, saveDir, plain, outPath, t.ffmpegPath)
@@ -702,9 +702,9 @@ func (r *Runner) RemoveItem(idx int) error {
 	return nil
 }
 
-// dropPlainVideo 删除与中文字幕版同名的普通版旧文件。
+// dropPlainVideo 删除与 -C/-U 新版同名的普通版旧文件。
 //
-// 前提变了：subPath 必须是**本次已提交**的中文字幕版（记录写完、标记已摘），
+// 前提变了：newPath 必须是**本次已提交**的新版（记录写完、标记已摘），
 // 由 downloadPhase 直接传进来，不再去目录里重新查找——重新查找会把别的目录里
 // 长得像成品的残件也当成参照。
 //
@@ -712,25 +712,25 @@ func (r *Runner) RemoveItem(idx int) error {
 //  1. 它自己是可信成品（completedVideo：有记录且大小一致，或旧版无标记）；
 //  2. 与新版时长一致（ffmpeg 读容器头，容差见 sameLength）。
 //
-// 体积不再作为完整性证据：高码率截断的 -C 完全可能超过旧档的一半，
+// 体积不再作为完整性证据：高码率截断的新版完全可能超过旧档的一半，
 // 靠比例判断会把好文件删掉。删错一部片的代价远高于多留一份，所以默认保留。
 //
 // 三种结局都写日志（删了 / 没有旧档 / 因为不可信保留），日志窗口里要能看出这一步
 // 确实跑过，而不是「没打印 = 没执行」。
-func (r *Runner) dropPlainVideo(pos, total int, root, saveDir, plain, subPath, ffmpeg string) {
+func (r *Runner) dropPlainVideo(pos, total int, root, saveDir, plain, newPath, ffmpeg string) {
 	cands := plainCandidates(root, saveDir, plain)
 	if len(cands) == 0 {
 		// 从没下过普通版是常态，仍留一行：否则用户无法判断清理有没有执行。
-		r.logf("info", fmt.Sprintf("[%d/%d] 没有同名的非中文字幕旧档需要清理", pos, total))
+		r.logf("info", fmt.Sprintf("[%d/%d] 没有同名的普通版旧档需要清理", pos, total))
 		return
 	}
 
 	// 新版时长只读一次：多个候选共用同一个参照。
-	subDur, subErr := mediaDurationFn(ffmpeg, subPath)
-	if subErr != nil {
+	newDur, newErr := mediaDurationFn(ffmpeg, newPath)
+	if newErr != nil {
 		r.logf("warn", fmt.Sprintf(
-			"[%d/%d] 读不到中文字幕版时长（%v），无法确认是否为完整替代，%d 个旧档全部保留：%s",
-			pos, total, subErr, len(cands), strings.Join(cands, "、")))
+			"[%d/%d] 读不到新版时长（%v），无法确认是否为完整替代，%d 个旧档全部保留：%s",
+			pos, total, newErr, len(cands), strings.Join(cands, "、")))
 		return
 	}
 
@@ -749,10 +749,10 @@ func (r *Runner) dropPlainVideo(pos, total int, root, saveDir, plain, subPath, f
 			r.logf("warn", fmt.Sprintf("[%d/%d] 读不到旧档时长（%v），保留：%s", pos, total, derr, p))
 			continue
 		}
-		if !sameLength(subDur, dur) {
+		if !sameLength(newDur, dur) {
 			r.logf("warn", fmt.Sprintf(
-				"[%d/%d] 旧档时长 %s 与中文字幕版 %s 不一致，不是同一版，保留：%s",
-				pos, total, dur.Round(time.Second), subDur.Round(time.Second), p))
+				"[%d/%d] 旧档时长 %s 与新版 %s 不一致，不是同一版，保留：%s",
+				pos, total, dur.Round(time.Second), newDur.Round(time.Second), p))
 			continue
 		}
 		if err := os.Remove(p); err != nil {
@@ -764,10 +764,10 @@ func (r *Runner) dropPlainVideo(pos, total int, root, saveDir, plain, subPath, f
 		_ = os.Remove(doneRecordPath(p))
 		_ = os.Remove(partMarkerPath(filepath.Dir(p), plain))
 		removed++
-		r.logf("info", fmt.Sprintf("[%d/%d] 已删除同名的非中文字幕旧档：%s", pos, total, p))
+		r.logf("info", fmt.Sprintf("[%d/%d] 已删除同名的普通版旧档：%s", pos, total, p))
 	}
 	if removed == 0 {
-		r.logf("info", fmt.Sprintf("[%d/%d] 没有可清理的非中文字幕旧档（%d 个候选均未通过校验）", pos, total, len(cands)))
+		r.logf("info", fmt.Sprintf("[%d/%d] 没有可清理的普通版旧档（%d 个候选均未通过校验）", pos, total, len(cands)))
 	}
 }
 
@@ -880,7 +880,7 @@ func buildItems(cfg config.Config, urls []string) []Item {
 }
 
 // findExistingVersion 按「本地已有的可接受版本」查成品：
-// 普通版链接在中文字幕版已存在时也算下过，中文字幕版则只认自己。
+// 普通版接受已完成的 -C/-U；-C 与 -U 各自只认自己，互不替代。
 func (r *Runner) findExistingVersion(root, saveDir, name string) string {
 	for _, n := range nameCandidates(name) {
 		if p := r.findExistingIndexed(root, saveDir, n); p != "" {
@@ -960,7 +960,7 @@ func buildFileIndex(root string) map[string][]string {
 // 再看保存目录根，最后扫一遍一级子目录（演员目录）。
 //
 // 后两处是为了兼容「目录变了但片子没变」：改动前下好的文件还在根目录，
-// 以及本次没解析出演员（missav 或页面解析失败）、但片子其实已经躺在某个
+// 以及本次没解析出演员（页面缺少演员信息或解析失败）、但片子其实已经躺在某个
 // 演员目录里。只查目标目录的话，这些都会被当成没下过而重新下一遍。
 //
 // 生产路径走 findExistingIndexed（每轮建一次索引，不逐条 ReadDir）。
@@ -1122,31 +1122,30 @@ func hasVideoExt(name string) bool {
 	return false
 }
 
-// chineseSubSuffix 是中文（中文字幕）版的命名后缀，由爬取侧拼接。
-const chineseSubSuffix = "-C"
+// enhancedSuffixes 是可替代普通版的独立版本后缀；两种增强版本互不替代。
+var enhancedSuffixes = []string{"-C", "-U"}
 
-// plainName 去掉中文字幕后缀，返回对应的普通版名字。
-// 不是中文字幕版时 ok=false。
+// plainName 返回 -C/-U 对应的普通版名字，只剥离最末一个后缀。
 func plainName(name string) (string, bool) {
-	base, found := strings.CutSuffix(name, chineseSubSuffix)
-	base = strings.TrimSpace(base)
-	if !found || base == "" {
-		return "", false
+	for _, suffix := range enhancedSuffixes {
+		if base, found := strings.CutSuffix(name, suffix); found && strings.TrimSpace(base) != "" {
+			return strings.TrimSpace(base), true
+		}
 	}
-	return base, true
+	return "", false
 }
 
-// nameCandidates 返回「本地哪些文件算这部片子已经下过」。
-//
-// 方向是有讲究的，中文字幕版和普通版不能一概而论：
-//   - 本次是普通版：本地有普通版或中文字幕版都算下过，没必要再下一份更差的。
-//   - 本次是中文字幕版：只认中文字幕版。本地只有普通版时要照下，
-//     下完再把普通版删掉（见 dropPlainVideo），否则升级永远进不来。
+// nameCandidates 与下载后的普通版清理共享后缀定义：普通版接受任一新版，
+// -C 与 -U 分别只认自己，本地只有普通版时继续下载，完成并验证后再清理。
 func nameCandidates(name string) []string {
 	if _, ok := plainName(name); ok {
 		return []string{name}
 	}
-	return []string{name, name + chineseSubSuffix}
+	candidates := []string{name}
+	for _, suffix := range enhancedSuffixes {
+		candidates = append(candidates, name+suffix)
+	}
+	return candidates
 }
 
 // fileStamp 是下载前对同名文件的快照，用来判断下载后哪些文件被这次重写过。

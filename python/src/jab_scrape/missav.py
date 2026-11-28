@@ -1,7 +1,9 @@
 """MissAV 站点解析：使用播放器和网络请求中的实际清单，不猜测画质路径。"""
 
 import re
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
+
+from bs4 import BeautifulSoup
 
 from .models import PageSnapshot
 from .scraper import BaseScraper
@@ -11,6 +13,14 @@ STREAM_PATH = re.compile(
     r"(?:playlist|([1-9][0-9]*)p/video)\.m3u8",
     re.IGNORECASE,
 )
+
+
+def _detail_rows(soup: BeautifulSoup, labels: set[str]):
+    """MissAV 当前作品资料；排除导航、推荐卡片与男优行。"""
+    for row in soup.select("div.text-secondary"):
+        label = row.find("span", recursive=False)
+        if label and label.get_text(strip=True).rstrip(":：").casefold() in labels:
+            yield row
 
 
 def _stream_key(url: str) -> tuple[str, int] | None:
@@ -32,10 +42,7 @@ def _stream_key(url: str) -> tuple[str, int] | None:
 
 class MissAVScraper(BaseScraper):
     def extract(self, page: PageSnapshot) -> tuple[str | None, str | None]:
-        title = self.extract_group(page.html, r"<title>(.*?)</title>")
-        video_name = title.split(" ")[0] if title else None
-        if video_name in ("Jable", "MissAV"):
-            video_name = None
+        video_name = self.video_name(page)
 
         candidates = {
             url: key
@@ -62,6 +69,58 @@ class MissAVScraper(BaseScraper):
             ),
         )
         return selected, video_name
+
+    @staticmethod
+    def video_name(page: PageSnapshot) -> str | None:
+        soup = BeautifulSoup(page.html, "html.parser")
+        # 详情区的番号不含标题、演员和画质文案；旧页面则使用标题的首项。
+        name = None
+        for row in _detail_rows(soup, {"番号", "番號", "code"}):
+            value = row.select_one("span.font-medium")
+            if value:
+                name = value.get_text(strip=True)
+                break
+        if not name:
+            title = soup.title.get_text(" ", strip=True) if soup.title else ""
+            name = title.split()[0] if title else None
+        if not name or name.casefold() in {"jable", "missav"}:
+            return None
+
+        # 仅判断当前 URL 的最后一段，不把 query、导航或推荐位当作本片类型。
+        slug = unquote(
+            urlsplit(page.url).path.rstrip("/").rsplit("/", 1)[-1]
+        ).casefold()
+        chinese = re.search(r"(?:^|-)chinese-subtitle(?:-|$)", slug)
+        uncensored = re.search(r"(?:^|-)uncensored(?:-leak)?(?:-|$)", slug)
+        if chinese and uncensored:
+            raise ValueError(
+                "该页面同时包含中文字幕和无码标记，无法归入单一 -C 或 -U 版本"
+            )
+        suffix = "-C" if chinese else "-U" if uncensored else ""
+        # 实际页面的“番号”可能是 HMN-916-CHINESE-SUBTITLE 等路由编号。
+        name = re.sub(
+            r"-(?:chinese-subtitle|uncensored(?:-leak)?)$",
+            "",
+            name,
+            flags=re.IGNORECASE,
+        )
+        return name.upper() + suffix
+
+    def extract_actors(self, html: str) -> list[str]:
+        soup = BeautifulSoup(html, "html.parser")
+        actors = []
+        for row in _detail_rows(soup, {"女优", "女優", "actress", "actresses"}):
+            for anchor in row.select("a[href]"):
+                href = anchor.get("href")
+                if not isinstance(href, str):
+                    continue
+                path = urlsplit(href).path
+                if not re.search(r"/actresses/[^/]+/?$", path):
+                    continue
+                name = anchor.get_text(" ", strip=True)
+                if name and name not in actors:
+                    actors.append(name)
+        return actors
 
     def extra_headers(self, page: PageSnapshot) -> dict[str, str]:
         source = urlsplit(page.url)

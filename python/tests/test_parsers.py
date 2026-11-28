@@ -177,6 +177,94 @@ class TestJable:
 
 
 class TestMissAV:
+    @pytest.mark.parametrize(
+        "url,name",
+        [
+            ("https://missav.ws/adn-764", "ADN-764"),
+            ("https://missav.ws/hmn-916-chinese-subtitle", "HMN-916-C"),
+            ("https://missav.ws/mida-912-uncensored-leak", "MIDA-912-U"),
+            ("https://missav.ws/cn/HMN-916-CHINESE-SUBTITLE/", "HMN-916-C"),
+            ("https://missav.ws/cn/mida-912-uncensored", "MIDA-912-U"),
+        ],
+    )
+    def test_version_names(self, url, name):
+        base = name.removesuffix("-C").removesuffix("-U")
+        html = f"<title>{base} 作品标题</title>"
+        assert MissAVScraper().extract(snapshot(html, url=url, media_urls=[VIDEO])) == (
+            VIDEO,
+            name,
+        )
+
+    def test_version_ignores_query_and_recommendations(self):
+        page = snapshot(
+            MISSAV_HTML + '<a href="/other-123-uncensored-leak">无码</a>'
+            '<a href="/other-234-chinese-subtitle">中文字幕</a>',
+            url="https://missav.ws/abc-123?next=chinese-subtitle#uncensored-leak",
+            media_urls=[VIDEO],
+        )
+        assert MissAVScraper().extract(page)[1] == "ABC-123"
+
+    def test_code_field_wins_over_title(self):
+        html = (
+            '<title>中文字幕 HMN-916 标题</title><div class="text-secondary">'
+            '<span>番號:</span><span class="font-medium">HMN-916</span></div>'
+        )
+        page = snapshot(html, url="https://missav.ws/hmn-916-chinese-subtitle")
+        assert MissAVScraper.video_name(page) == "HMN-916-C"
+
+    @pytest.mark.parametrize(
+        "marker,suffix", [("CHINESE-SUBTITLE", "-C"), ("UNCENSORED-LEAK", "-U")]
+    )
+    def test_code_field_with_route_marker(self, marker, suffix):
+        html = (
+            '<title>ABC-123 作品</title><div class="text-secondary">'
+            f'<span>番號:</span><span class="font-medium">ABC-123-{marker}</span></div>'
+        )
+        page = snapshot(html, url=f"https://missav.ws/abc-123-{marker.lower()}")
+        assert MissAVScraper.video_name(page) == "ABC-123" + suffix
+
+    def test_ambiguous_version_fails_explicitly(self):
+        with pytest.raises(ValueError, match="同时包含"):
+            MissAVScraper.video_name(
+                snapshot(
+                    MISSAV_HTML,
+                    url="https://missav.ws/abc-123-uncensored-leak-chinese-subtitle",
+                )
+            )
+
+    @pytest.mark.parametrize("label", ["女優:", "女优：", "Actress:", "Actresses:"])
+    def test_only_detail_actresses_and_keep_display_names(self, label):
+        html = f"""<nav><a href="/actresses/ranking">女优排行</a></nav>
+        <div class="text-secondary"><span>{label}</span>
+          <a href="https://missav.ws/dm177/actresses/abc">白峰美羽 (白峰ミウ)</a>,
+          <a href="/cn/actresses/def">香水じゅん</a>
+          <a href="/dm222/actresses/abc">白峰美羽 (白峰ミウ)</a>
+        </div>
+        <div class="text-secondary"><span>男優:</span><a href="/actors/xyz">野島誠</a></div>
+        <aside><a href="/actresses/other">推荐演员</a></aside>"""
+        assert MissAVScraper().extract_actors(html) == [
+            "白峰美羽 (白峰ミウ)",
+            "香水じゅん",
+        ]
+
+    def test_scrape_returns_name_and_actresses_together(self, monkeypatch):
+        html = (
+            MISSAV_HTML
+            + """<div class="text-secondary"><span>女優:</span>
+            <a href="/dm177/actresses/abc">白峰美羽 (白峰ミウ)</a></div>"""
+        )
+        page = snapshot(
+            html, url="https://missav.ws/abc-123-uncensored-leak", media_urls=[VIDEO]
+        )
+        monkeypatch.setattr(BaseScraper, "fetch_page", staticmethod(lambda url: page))
+        result = MissAVScraper().scrape(page.url)
+        assert result.ok
+        assert result.video_name == "ABC-123-U"
+        assert result.actors == ["白峰美羽 (白峰ミウ)"]
+
+    def test_absent_actress_is_empty(self):
+        assert MissAVScraper().extract_actors(MISSAV_HTML) == []
+
     def test_master_address_alone_is_not_ready(self):
         page = snapshot(MISSAV_HTML, player_url=MASTER, media_urls=[MASTER])
         assert MissAVScraper().extract(page) == (None, "ABC-123")

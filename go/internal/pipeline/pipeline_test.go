@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -202,7 +203,7 @@ func TestDropPlainVideoLogsEveryOutcome(t *testing.T) {
 	// 从没下过普通版：也要有一行 info 交代「无需清理」
 	r, logs := newRunner()
 	r.dropPlainVideo(1, 2, root, actor, "ABC-123", "", "")
-	if !hasLog(*logs, "info", "没有同名的非中文字幕旧档需要清理") {
+	if !hasLog(*logs, "info", "没有同名的普通版旧档需要清理") {
 		t.Fatalf("无旧档时应写一行日志 got=%v", *logs)
 	}
 
@@ -220,7 +221,7 @@ func TestDropPlainVideoLogsEveryOutcome(t *testing.T) {
 	})
 	r, logs = newRunner()
 	r.dropPlainVideo(1, 2, root, actor, "ABC-123", sub, "/usr/bin/ffmpeg")
-	if !hasLog(*logs, "info", "已删除同名的非中文字幕旧档："+plain) {
+	if !hasLog(*logs, "info", "已删除同名的普通版旧档："+plain) {
 		t.Fatalf("删除后应写一行带路径的日志 got=%v", *logs)
 	}
 	if _, err := os.Stat(plain); !os.IsNotExist(err) {
@@ -297,7 +298,7 @@ func TestPlainName(t *testing.T) {
 	}
 }
 
-// 中文字幕版下完后，同名的非中文字幕旧档要清掉：目标演员目录、保存目录根、
+// 中文字幕版下完后，同名的普通版旧档要清掉：目标演员目录、保存目录根、
 // 其它演员目录里的都算；每个候选都要通过校验才删，不同名的文件一个都不能动。
 func TestDropPlainVideoDeletesAllVerifiedCandidates(t *testing.T) {
 	root := t.TempDir()
@@ -358,7 +359,7 @@ func TestDropPlainVideoDeletesAllVerifiedCandidates(t *testing.T) {
 			t.Fatalf("不应删除 %s: %v", p, err)
 		}
 	}
-	if !hasLog(logs, "info", "已删除同名的非中文字幕旧档："+inRoot) {
+	if !hasLog(logs, "info", "已删除同名的普通版旧档："+inRoot) {
 		t.Fatalf("每个被删的路径都要有日志 got=%v", logs)
 	}
 }
@@ -393,7 +394,7 @@ func TestDropPlainVideoKeepsPlainWhenNotVerifiable(t *testing.T) {
 	if _, err := os.Stat(plain); err != nil {
 		t.Fatalf("读不到新版时长时应保留旧档: %v", err)
 	}
-	if !hasLog(*logs, "warn", "读不到中文字幕版时长") {
+	if !hasLog(*logs, "warn", "读不到新版时长") {
 		t.Fatalf("应说明为什么保留 got=%v", *logs)
 	}
 
@@ -437,8 +438,8 @@ func TestDropPlainVideoKeepsPlainWhenNotVerifiable(t *testing.T) {
 // 中文字幕版链接遇到只有普通版时仍要下载（否则永远升不上去）。
 func TestNameCandidates(t *testing.T) {
 	plain := nameCandidates("ABC-123")
-	if len(plain) != 2 || plain[0] != "ABC-123" || plain[1] != "ABC-123-C" {
-		t.Fatalf("普通版应同时接受两个版本 got=%v", plain)
+	if len(plain) != 3 || plain[0] != "ABC-123" || plain[1] != "ABC-123-C" || plain[2] != "ABC-123-U" {
+		t.Fatalf("普通版应接受原版与两种新版 got=%v", plain)
 	}
 	sub := nameCandidates("ABC-123-C")
 	if len(sub) != 1 || sub[0] != "ABC-123-C" {
@@ -802,6 +803,180 @@ func BenchmarkStatePush(b *testing.B) {
 				cp := cloneState(st)
 				if _, err := json.Marshal(cp); err != nil {
 					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+// MissAV 与 Jable 共用 downloadPhase：目录、版本判定、完成记录及清理都从这里验证。
+func TestMissAVDownloadLifecycle(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("本测试使用 POSIX 假下载器")
+	}
+	for _, suffix := range []string{"", "-C", "-U"} {
+		t.Run("complete"+suffix, func(t *testing.T) {
+			root := t.TempDir()
+			actorDir := filepath.Join(root, "白峰美羽 (白峰ミウ)")
+			otherDir := filepath.Join(root, "旧演员目录")
+			if err := os.MkdirAll(otherDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			name := "ABC-123" + suffix
+			plain := filepath.Join(otherDir, "ABC-123.mp4")
+			peerSuffix := "-C"
+			if suffix == "-C" {
+				peerSuffix = "-U"
+			}
+			peer := filepath.Join(otherDir, "ABC-123"+peerSuffix+".mp4")
+			output := filepath.Join(actorDir, name+".mp4")
+			if suffix != "" {
+				for _, path := range []string{plain, peer} {
+					if err := os.WriteFile(path, []byte("old-complete"), 0644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				stubDuration(t, map[string]time.Duration{plain: time.Minute, output: time.Minute})
+			}
+			script := filepath.Join(t.TempDir(), "dlre.sh")
+			if err := os.WriteFile(script, []byte(fakeDlreScript), 0755); err != nil {
+				t.Fatal(err)
+			}
+			cfg := config.Default()
+			cfg.SaveDir = root
+			r := New(cfg, Hooks{})
+			r.state = State{Total: 1, Items: []Item{{URL: "https://missav.ws/abc-123", Site: "missav"}}}
+			r.token = 1
+			r.fileIndex = buildFileIndex(root)
+			res := scraper.Result{OK: true, VideoName: name, M3U8URL: "https://media.example/test.m3u8", Actors: []string{"白峰美羽 (白峰ミウ)"}}
+			if err := r.downloadPhase(context.Background(), cfg, tools{dlrPath: script, ffmpegPath: "/usr/bin/true"}, 0, res, 1); err != nil {
+				t.Fatal(err)
+			}
+			if got := r.item(0); got.Status != StatusDone || got.Path != output {
+				t.Fatalf("incorrect output: %+v", got)
+			}
+			if _, err := os.Stat(doneRecordPath(output)); err != nil {
+				t.Fatal("missing done record", err)
+			}
+			if _, err := os.Stat(partMarkerPath(actorDir, name)); !os.IsNotExist(err) {
+				t.Fatal("part marker retained", err)
+			}
+			if suffix != "" {
+				if _, err := os.Stat(plain); !os.IsNotExist(err) {
+					t.Fatal("ordinary version retained", err)
+				}
+				if _, err := os.Stat(peer); err != nil {
+					t.Fatal("C/U peer must be preserved", err)
+				}
+			}
+			if got := r.findExistingVersion(root, actorDir, "ABC-123"); got == "" {
+				t.Fatal("plain version must recognize completed output")
+			}
+			// 下次找得到成品时不会执行不存在的下载器。
+			if err := r.downloadPhase(context.Background(), cfg, tools{dlrPath: "missing"}, 0, res, 1); err != nil {
+				t.Fatal(err)
+			}
+			if r.item(0).Status != StatusSkipped {
+				t.Fatal("completed version not skipped")
+			}
+		})
+	}
+}
+
+func TestIndependentEnhancedVersions(t *testing.T) {
+	for _, suffix := range []string{"-C", "-U"} {
+		t.Run(suffix, func(t *testing.T) {
+			base, ok := plainName("ABC-123" + suffix)
+			if !ok || base != "ABC-123" {
+				t.Fatalf("plain name: %q %v", base, ok)
+			}
+			if _, ok := plainName(suffix); ok {
+				t.Fatal("suffix without code accepted")
+			}
+			got := nameCandidates("ABC-123" + suffix)
+			if len(got) != 1 || got[0] != "ABC-123"+suffix {
+				t.Fatal(got)
+			}
+			root := t.TempDir()
+			actor := filepath.Join(root, "演员")
+			if err := os.Mkdir(actor, 0755); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(actor, "ABC-123"+suffix+".mp4")
+			if err := os.WriteFile(path, []byte("complete"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			r := &Runner{fileIndex: buildFileIndex(root)}
+			if got := r.findExistingVersion(root, root, "ABC-123"); got != path {
+				t.Fatalf("ordinary must accept %s: %q", suffix, got)
+			}
+			peer := "-U"
+			if suffix == "-U" {
+				peer = "-C"
+			}
+			if got := r.findExistingVersion(root, root, "ABC-123"+peer); got != "" {
+				t.Fatal("C and U incorrectly substituted", got)
+			}
+			if err := os.WriteFile(partMarkerPath(actor, "ABC-123"+suffix), []byte("partial"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if got := r.findExistingVersion(root, root, "ABC-123"); got != "" {
+				t.Fatal("partial enhanced version skipped", got)
+			}
+		})
+	}
+}
+
+func TestMissAVKeepsOldVersionsWhenReplacementUnverified(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("使用 POSIX 假下载器")
+	}
+	for _, scenario := range []string{"no-output", "different-length", "unknown-length"} {
+		t.Run(scenario, func(t *testing.T) {
+			root := t.TempDir()
+			actor := filepath.Join(root, "演员")
+			script := filepath.Join(t.TempDir(), "dlre.sh")
+			if err := os.WriteFile(script, []byte(fakeDlreScript), 0755); err != nil {
+				t.Fatal(err)
+			}
+			plain := filepath.Join(root, "ABC-123.mp4")
+			sub := filepath.Join(root, "ABC-123-C.mp4")
+			for _, p := range []string{plain, sub} {
+				if err := os.WriteFile(p, []byte("keep"), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			out := filepath.Join(actor, "ABC-123-U.mp4")
+			if scenario == "no-output" {
+				t.Setenv("FAKE_NONE", "1")
+			}
+			durations := map[string]time.Duration{plain: time.Minute}
+			if scenario != "unknown-length" {
+				durations[out] = 2 * time.Minute
+			}
+			stubDuration(t, durations)
+			cfg := config.Default()
+			cfg.SaveDir = root
+			r := New(cfg, Hooks{})
+			r.token = 1
+			r.fileIndex = buildFileIndex(root)
+			r.state = State{Total: 1, Items: []Item{{URL: "https://missav.ws/abc-123-uncensored-leak", Site: "missav"}}}
+			res := scraper.Result{OK: true, VideoName: "ABC-123-U", Actors: []string{"演员"}, M3U8URL: "https://media.example/test.m3u8"}
+			err := r.downloadPhase(context.Background(), cfg, tools{dlrPath: script, ffmpegPath: "/usr/bin/true"}, 0, res, 1)
+			if (err != nil) != (scenario == "no-output") {
+				t.Fatalf("unexpected download error: %v", err)
+			}
+			for _, p := range []string{plain, sub} {
+				if body, e := os.ReadFile(p); e != nil || string(body) != "keep" {
+					t.Fatalf("old version changed: %s %v", p, e)
+				}
+			}
+			if scenario == "no-output" {
+				if r.item(0).Status == StatusDone {
+					t.Fatal("missing output marked complete")
+				}
+				if _, err := os.Stat(partMarkerPath(actor, "ABC-123-U")); err != nil {
+					t.Fatal("missing incomplete marker", err)
 				}
 			}
 		})
