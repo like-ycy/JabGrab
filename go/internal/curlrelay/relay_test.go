@@ -219,8 +219,12 @@ func TestPartialSegmentIsNotSuccessful(t *testing.T) {
 	_, body := getBody(t, r.URL())
 	resp, err := http.Get(mediaLines(body)[0])
 	if err == nil {
+		status := resp.StatusCode
 		_, err = io.ReadAll(resp.Body)
 		resp.Body.Close()
+		if status == http.StatusBadGateway && r.Err() != nil {
+			return // curl 在暂存阶段已发现截断，尚未向下载器交付任何分片字节。
+		}
 	}
 	if err == nil {
 		t.Fatal("截断的分片被报告为成功")

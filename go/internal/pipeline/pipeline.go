@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -530,7 +531,7 @@ func (r *Runner) downloadPhase(
 		MuxToMP4:      cfg.Download.MuxToMP4,
 		FFmpegPath:    t.ffmpegPath,
 		Headers:       res.Headers,
-		CurlTransport: r.item(idx).Site == "missav",
+		CurlTransport: runtime.GOOS == "windows" && r.item(idx).Site == "missav",
 		// 记下下载器进程：按下「停止」时直接杀这个进程组（含它派生的 ffmpeg）。
 		OnStart: func(pid int) {
 			child = pid

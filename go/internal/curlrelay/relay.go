@@ -32,7 +32,7 @@ type Relay struct {
 	server    *http.Server
 	workers   sync.WaitGroup
 	sem       chan struct{}
-	bin       string
+	transport *transport
 	headers   http.Header
 	timeout   time.Duration
 	origin    *url.URL
@@ -75,13 +75,20 @@ func Start(ctx context.Context, opts Options) (*Relay, error) {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	r := &Relay{cancel: cancel, bin: bin, headers: headers, origin: root,
+	transport, err := newTransport(ctx, bin, opts.Concurrency)
+	if err != nil {
+		cancel()
+		listener.Close()
+		return nil, err
+	}
+	r := &Relay{cancel: cancel, transport: transport, headers: headers, origin: root,
 		timeout: opts.Timeout, sem: make(chan struct{}, opts.Concurrency),
 		base:   "http://" + listener.Addr().String() + "/" + rand.Text(),
 		routes: make(map[string]*url.URL), byURL: make(map[string]string)}
 	r.entry, err = r.register(root)
 	if err != nil {
 		cancel()
+		transport.close()
 		listener.Close()
 		return nil, err
 	}
@@ -103,8 +110,11 @@ func (r *Relay) Close() {
 		r.cancel()
 		_ = r.server.Close()
 		r.workers.Wait()
+		r.transport.close()
 	})
 }
+
+func (r *Relay) Stats() Stats { return r.transport.stats() }
 
 func (r *Relay) Err() error {
 	r.mu.Lock()
@@ -202,11 +212,6 @@ func (r *Relay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if req.Method == http.MethodHead {
-		_, _ = io.Copy(io.Discard, response.body)
-		if err := response.wait(); err != nil {
-			r.fail(w, err)
-			return
-		}
 		copyHeaders(w.Header(), response.header)
 		w.WriteHeader(response.status)
 		return
@@ -216,9 +221,6 @@ func (r *Relay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		body, err := io.ReadAll(io.LimitReader(response.body, maxManifestSize+1))
 		if err == nil && len(body) > maxManifestSize {
 			err = errors.New("HLS 清单超过大小限制")
-		}
-		if err == nil {
-			err = response.wait()
 		}
 		if err == nil {
 			body, err = r.rewrite(body, finalURL)
@@ -239,9 +241,6 @@ func (r *Relay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	copyHeaders(w.Header(), response.header)
 	w.WriteHeader(response.status)
 	_, err = io.Copy(w, response.body)
-	if err == nil {
-		err = response.wait()
-	}
 	if err != nil {
 		r.mu.Lock()
 		if !r.closed {
@@ -269,7 +268,7 @@ func (r *Relay) get(ctx context.Context, target *url.URL, method string, headers
 		if !r.allowed(target) {
 			return nil, nil, errors.New("媒体重定向离开了允许的源")
 		}
-		response, err := fetch(ctx, r.bin, target.String(), method, headers, r.timeout)
+		response, err := r.transport.fetch(ctx, target.String(), method, headers, r.timeout)
 		if err != nil {
 			return nil, nil, err
 		}

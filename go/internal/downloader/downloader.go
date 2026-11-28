@@ -261,13 +261,15 @@ func (o Options) Run(
 		}
 		defer func() {
 			relay.Close()
+			stats := relay.Stats()
+			emit(fmt.Sprintf("curl 媒体传输：%d 次请求，%d 个批次进程，%d 次新建连接", stats.Requests, stats.Processes, stats.Connections))
 			if runErr != nil && ctx.Err() == nil && relay.Err() != nil {
 				runErr = fmt.Errorf("%w；媒体请求: %v", runErr, relay.Err())
 			}
 		}()
 		m3u8 = relay.URL()
 		o.Headers = nil // 来源请求头只由 curl 发给媒体站点。
-		emit("MissAV 使用系统 curl 获取媒体（HTTP/1.1，不叠加应用代理；TUN 仍由系统路由控制）")
+		emit("MissAV 使用系统 curl 批量获取媒体（HTTP/1.1，继承环境代理；TUN 按系统路由生效）")
 	}
 
 	cmd := exec.CommandContext(ctx, bin, o.Args(m3u8)...) //nolint:gosec // 路径与参数均来自本地配置

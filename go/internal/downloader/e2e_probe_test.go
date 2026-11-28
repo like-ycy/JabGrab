@@ -37,7 +37,7 @@ func TestCurlTransportE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	generate := exec.Command(ffmpeg, "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=25", "-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=44100",
-		"-t", "2", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-f", "hls", "-hls_time", "1", "-hls_list_size", "0",
+		"-t", "8", "-c:v", "libx264", "-preset", "ultrafast", "-g", "25", "-sc_threshold", "0", "-c:a", "aac", "-f", "hls", "-hls_time", "1", "-hls_list_size", "0",
 		"-hls_segment_filename", filepath.Join(fixture, "segment%d.ts"), filepath.Join(fixture, "video.m3u8"))
 	if output, err := generate.CombinedOutput(); err != nil {
 		t.Fatalf("生成 HLS: %v %s", err, output)
@@ -53,7 +53,7 @@ func TestCurlTransportE2E(t *testing.T) {
 	defer origin.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
-	opts := Options{Bin: bin, SaveDir: filepath.Join(dir, "output"), SaveName: "result", Threads: 2, RetryCount: 1,
+	opts := Options{Bin: bin, SaveDir: filepath.Join(dir, "output"), SaveName: "result", Threads: 4, RetryCount: 1,
 		TimeoutSec: 10, MuxToMP4: true, FFmpegPath: ffmpeg, CurlTransport: true,
 		Headers: map[string]string{"user-agent": "browser-e2e", "referer": "https://missav.ws/cn/test"}}
 	if err := opts.Run(ctx, origin.URL+"/video.m3u8", nil, func(line string) { t.Log(line) }); err != nil {
